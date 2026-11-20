@@ -1,0 +1,1202 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+    <meta name="apple-mobile-web-app-title" content="Heads Up!">
+    <meta name="theme-color" content="#0042f9">
+    <link rel="apple-touch-icon" href="apple-touch-icon.png">
+    <link rel="manifest" href="manifest.webmanifest">
+    <title>Heads Up! AI Edition</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/animejs/3.2.1/anime.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Fredoka+One&family=Nunito:wght@700;800&display=swap');
+
+        body {
+            font-family: 'Nunito', sans-serif;
+            overflow: hidden;
+            touch-action: none;
+            background-color: #0f172a;
+            color: #f8fafc;
+        }
+
+        h1, h2, h3, .fredoka { font-family: 'Fredoka One', cursive; }
+
+        .bg-gradient-fun { background: linear-gradient(135deg, #6366f1, #ec4899, #f59e0b); background-size: 200% 200%; animation: gradientBG 10s ease infinite; }
+        @keyframes gradientBG { 0% { background-position: 0% 50%; } 50% { background-position: 100% 50%; } 100% { background-position: 0% 50%; } }
+
+        .bg-card-pattern { background-color: #ffffff; background-image: radial-gradient(#cbd5e1 2px, transparent 2px); background-size: 20px 20px; }
+
+        .btn-3d { transition: all 0.1s; box-shadow: 0 6px 0 var(--btn-shadow); transform: translateY(0); }
+        .btn-3d:active { box-shadow: 0 0 0 var(--btn-shadow); transform: translateY(6px); }
+        .btn-primary { background-color: #14b8a6; color: white; --btn-shadow: #0d9488; }
+        .btn-secondary { background-color: #f43f5e; color: white; --btn-shadow: #e11d48; }
+        .btn-category { background-color: #3b82f6; color: white; --btn-shadow: #2563eb; }
+        .btn-cat-green { background-color: #22c55e; color: white; --btn-shadow: #16a34a; }
+        .btn-cat-rose { background-color: #f43f5e; color: white; --btn-shadow: #e11d48; }
+        .btn-cat-amber { background-color: #f59e0b; color: white; --btn-shadow: #d97706; }
+        .btn-cat-purple { background-color: #8b5cf6; color: white; --btn-shadow: #7c3aed; }
+
+        .screen {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%; height: 100dvh;
+            display: flex; flex-direction: column; justify-content: center; align-items: center;
+            opacity: 0; pointer-events: none; transition: opacity 0.3s ease-in-out; z-index: 10;
+        }
+        .screen.active { opacity: 1; pointer-events: auto; z-index: 20; }
+
+        #game-screen { transition: background-color 0.2s; }
+        .game-state-normal { background-color: #3b82f6; }
+        .game-state-correct { background-color: #10b981; }
+        .game-state-pass { background-color: #ef4444; }
+
+        .card-container { perspective: 1000px; width: min(92vw, 140dvh); height: min(66dvh, 88vw); pointer-events: none;}
+        .card-inner {
+            width: 100%; height: 100%; border-radius: 1.5rem; display: flex; justify-content: center;
+            align-items: center; text-align: center; padding: 2rem;
+            box-shadow: 0 20px 25px -5px rgba(0,0,0,0.2); transform-style: preserve-3d;
+        }
+        #word-display { font-size: clamp(2.5rem, 13vmin, 9rem); line-height: 1.1; color: #1e293b; text-transform: uppercase;}
+
+        #landscape-prompt {
+            display: none; position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(15, 23, 42, 0.95); color: white; z-index: 100;
+            flex-direction: column; justify-content: center; align-items: center; text-align: center;
+        }
+        @media screen and (orientation: portrait) { body.playing #landscape-prompt { display: flex; } }
+
+        .loader { border: 4px solid rgba(255,255,255,0.3); border-top: 4px solid #fff; border-radius: 50%; width: 40px; height: 40px; animation: spin 1s linear infinite; margin: 0 auto; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+    </style>
+</head>
+<body class="bg-slate-900 text-slate-800">
+
+    <!-- Audio Synthesis -->
+    <script>
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        function playTone(freq, type, duration, vol=0.1) {
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.type = type; osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+            gain.gain.setValueAtTime(vol, audioCtx.currentTime);
+            gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
+            osc.connect(gain); gain.connect(audioCtx.destination); osc.start(); osc.stop(audioCtx.currentTime + duration);
+        }
+        const soundFX = {
+            tick: () => playTone(800, 'sine', 0.1, 0.05),
+            chime: () => { playTone(1046.5, 'sine', 0.22, 0.3); setTimeout(() => playTone(1318.5, 'sine', 0.28, 0.3), 110); },
+            start: () => { playTone(440, 'square', 0.2, 0.1); setTimeout(() => playTone(880, 'square', 0.4, 0.1), 200); },
+            correct: () => { playTone(523.25, 'sine', 0.1, 0.1); setTimeout(() => playTone(659.25, 'sine', 0.2, 0.1), 100); },
+            pass: () => { playTone(300, 'sawtooth', 0.2, 0.1); setTimeout(() => playTone(200, 'sawtooth', 0.3, 0.1), 150); },
+            end: () => { playTone(440, 'triangle', 0.5, 0.1); setTimeout(() => playTone(349, 'triangle', 0.5, 0.1), 300); setTimeout(() => playTone(261, 'triangle', 1.0, 0.1), 600); }
+        };
+    </script>
+
+    <!-- LANDSCAPE PROMPT -->
+    <div id="landscape-prompt" class="p-8">
+        <svg class="w-32 h-32 mb-6 text-white animate-bounce" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 18h.01M8 21h8a2 2 0 002-2V5a2 2 0 00-2-2H8a2 2 0 00-2 2v14a2 2 0 002 2z"></path></svg>
+        <h2 class="text-4xl fredoka mb-4">Rotate Device!</h2>
+        <p class="text-xl text-gray-300 max-w-md">Turn your phone sideways to play.</p>
+        <button onclick="startGameRound()" class="mt-8 px-6 py-3 bg-white text-slate-900 rounded-full font-bold md:hidden">Override (Desktop Test)</button>
+    </div>
+
+    <!-- MAIN MENU -->
+    <div id="menu-screen" class="screen active bg-gradient-fun p-4 overflow-y-auto block pt-8">
+        <div class="max-w-2xl mx-auto bg-white/95 backdrop-blur-sm p-6 md:p-8 rounded-3xl shadow-2xl border-4 border-white mb-8">
+            <h1 class="text-5xl md:text-6xl text-center mb-2 text-slate-800 drop-shadow-sm">Heads Up!</h1>
+            <p class="text-center text-lg font-extrabold text-pink-500 mb-8 uppercase tracking-widest">AI Generative Edition</p>
+
+            <!-- Round video toggle -->
+            <div class="mb-8 flex items-center justify-between bg-slate-100 border-2 border-slate-200 rounded-2xl px-5 py-4">
+                <span class="font-extrabold text-slate-600 uppercase tracking-wide">🎥 Record round video</span>
+                <input id="record-toggle" type="checkbox" onchange="setRecordWanted(this.checked)" class="w-8 h-8 accent-rose-500">
+            </div>
+
+            <!-- Motion controls toggle -->
+            <div class="mb-8 flex items-center justify-between bg-slate-100 border-2 border-slate-200 rounded-2xl px-5 py-4">
+                <span class="font-extrabold text-slate-600 uppercase tracking-wide">🎯 Motion controls</span>
+                <input id="motion-toggle" type="checkbox" onchange="setMotion(this.checked)" class="w-8 h-8 accent-blue-500">
+            </div>
+
+            <!-- Tilt calibration -->
+            <div class="mb-8">
+                <button onclick="startCalibration()" class="btn-3d btn-category w-full py-4 rounded-2xl text-xl font-extrabold uppercase">🎯 Calibrate Tilt</button>
+                <p id="cal-status" class="text-center text-slate-500 font-bold mt-2">Tilt not calibrated yet — calibration makes it work folded or unfolded.</p>
+            </div>
+
+            <!-- Standard Categories -->
+            <div class="mb-8">
+                <h3 class="text-lg font-extrabold text-slate-500 uppercase tracking-wider mb-4 border-b-2 border-slate-200 pb-2">Classics</h3>
+                <div class="grid grid-cols-2 gap-3">
+                    <button onclick="prepareGame('standard', 'Blockbuster Movies')" class="btn-3d btn-category py-3 rounded-xl font-bold uppercase">🍿 Movies</button>
+                    <button onclick="prepareGame('standard', 'Animals')" class="btn-3d btn-cat-green py-3 rounded-xl font-bold uppercase">🦁 Animals</button>
+                    <button onclick="prepareGame('standard', 'Celebrities')" class="btn-3d btn-cat-rose py-3 rounded-xl font-bold uppercase">⭐ Celebrities</button>
+                    <button onclick="prepareGame('standard', 'Act It Out')" class="btn-3d btn-cat-amber py-3 rounded-xl font-bold uppercase">🎭 Act It Out</button>
+                </div>
+            </div>
+
+
+            <!-- More Categories -->
+            <div class="mb-8">
+                <h3 class="text-lg font-extrabold text-slate-500 uppercase tracking-wider mb-4 border-b-2 border-slate-200 pb-2">More Categories</h3>
+                <div class="grid grid-cols-2 gap-3">
+                    <button onclick="prepareGame('standard', 'Food &amp; Drink')" class="btn-3d btn-cat-purple py-3 rounded-xl font-bold uppercase">🍔 Food & Drink</button>
+                    <button onclick="prepareGame('standard', 'Sports Legends')" class="btn-3d btn-category py-3 rounded-xl font-bold uppercase">🏆 Sports Legends</button>
+                    <button onclick="prepareGame('standard', 'Music Stars')" class="btn-3d btn-cat-rose py-3 rounded-xl font-bold uppercase">🎵 Music Stars</button>
+                    <button onclick="prepareGame('standard', 'Famous Places')" class="btn-3d btn-cat-green py-3 rounded-xl font-bold uppercase">🗽 Famous Places</button>
+                    <button onclick="prepareGame('standard', 'Jobs &amp; Professions')" class="btn-3d btn-cat-amber py-3 rounded-xl font-bold uppercase">💼 Jobs & Professions</button>
+                    <button onclick="prepareGame('standard', 'Around the House')" class="btn-3d btn-cat-purple py-3 rounded-xl font-bold uppercase">🏠 Around the House</button>
+                    <button onclick="prepareGame('standard', 'Video Games')" class="btn-3d btn-category py-3 rounded-xl font-bold uppercase">🎮 Video Games</button>
+                    <button onclick="prepareGame('standard', 'TV Shows')" class="btn-3d btn-cat-rose py-3 rounded-xl font-bold uppercase">📺 TV Shows</button>
+                    <button onclick="prepareGame('standard', 'Accents &amp; Impressions')" class="btn-3d btn-cat-green py-3 rounded-xl font-bold uppercase">🎤 Accents & Impressions</button>
+                    <button onclick="prepareGame('standard', 'That\'s So 90s')" class="btn-3d btn-cat-amber py-3 rounded-xl font-bold uppercase">📼 That's So 90s</button>
+                    <button onclick="prepareGame('standard', 'Kids\' Favorites')" class="btn-3d btn-cat-purple py-3 rounded-xl font-bold uppercase">🧸 Kids' Favorites</button>
+                </div>
+            </div>
+
+            <!-- Custom Category -->
+            <div class="bg-slate-100 p-5 rounded-2xl mb-6">
+                <h3 class="text-lg font-extrabold text-slate-500 uppercase tracking-wider mb-3">Custom Deck</h3>
+                <div class="flex flex-col gap-3">
+                    <input type="text" id="custom-topic" placeholder="e.g. 90s Sitcoms, Video Games..." class="w-full p-4 text-xl rounded-xl border-2 border-slate-300 focus:border-teal-500 outline-none font-bold text-slate-700 bg-white">
+                    <button onclick="prepareGame('custom')" class="btn-3d btn-primary w-full py-4 rounded-xl text-xl font-bold uppercase tracking-wide">
+                        Generate & Play
+                    </button>
+                </div>
+            </div>
+
+            <!-- Dynamic Premade -->
+            <div>
+                <button onclick="prepareGame('local')" class="btn-3d btn-secondary w-full py-4 rounded-xl text-xl font-bold uppercase tracking-wide flex items-center justify-center gap-2">
+                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.243-4.243a8 8 0 1111.314 0z"></path><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"></path></svg>
+                    Local & Now Deck
+                </button>
+                <p class="text-sm text-slate-500 mt-2 font-bold text-center">AI creates cards based on your current time & location.</p>
+            </div>
+        </div>
+    </div>
+
+    <!-- PRE-GAME LOADING -->
+    <div id="prep-screen" class="screen bg-slate-900 text-white">
+        <div id="loading-ui" class="text-center w-full max-w-md px-6">
+            <div class="loader mb-6"></div>
+            <h2 class="text-3xl fredoka mb-4 text-teal-400" id="prep-status">Getting your deck ready...</h2>
+            <p class="text-slate-400 mb-8" id="prep-subtext">Shuffling your cards.</p>
+        </div>
+
+        <div id="prep-instructions" class="hidden text-center max-w-lg p-6 bg-slate-800 rounded-3xl border-4 border-slate-700 w-[90%]">
+            <h3 class="text-3xl fredoka mb-6 text-yellow-400">Ready to Play!</h3>
+            <div class="bg-slate-900 rounded-2xl p-4 mb-8">
+                <ul class="text-xl text-left space-y-6 font-bold">
+                    <li class="flex items-center gap-4 text-red-400"><span class="text-4xl">⬆️</span> <span class="flex-1">Tilt <b>UP</b> (face ceiling) to <b>PASS</b></span></li>
+                    <li class="flex items-center gap-4 text-green-400"><span class="text-4xl">⬇️</span> <span class="flex-1">Tilt <b>DOWN</b> (face floor) if <b>CORRECT</b></span></li>
+                </ul>
+            </div>
+            <p class="text-slate-300 mb-2 font-bold uppercase tracking-widest text-sm">Hold phone to your forehead facing out.</p>
+            <p class="text-teal-400 mb-6 font-bold text-xs">(Or tap the sides of the screen if gyro fails)</p>
+            <button onclick="requestSensorsAndStart()" class="btn-3d btn-primary px-8 py-5 rounded-xl text-2xl font-bold uppercase w-full">
+                Let's Go!
+            </button>
+        </div>
+    </div>
+
+    <!-- COUNTDOWN -->
+    <div id="countdown-screen" class="screen bg-slate-900 text-white">
+        <div id="countdown-number" class="text-[15rem] fredoka text-yellow-400 drop-shadow-[0_0_30px_rgba(250,204,21,0.6)]">3</div>
+        <p class="text-3xl mt-4 text-slate-300 uppercase tracking-widest font-extrabold">Place on forehead</p>
+    </div>
+
+    <!-- ACTIVE GAME -->
+    <div id="game-screen" class="screen game-state-normal">
+        <div class="absolute top-0 left-0 w-full p-6 flex justify-between items-center text-white font-extrabold text-3xl z-10 pointer-events-none">
+            <div id="timer" class="bg-black/30 px-6 py-2 rounded-xl backdrop-blur-sm">60</div>
+            <div class="text-xl uppercase tracking-widest opacity-90 px-4 text-center hidden md:block" id="current-deck-name">Deck</div>
+            <div id="score-display" class="bg-black/30 px-6 py-2 rounded-xl backdrop-blur-sm text-green-300">0</div>
+        </div>
+
+        <div class="card-container z-10 pointer-events-none">
+            <div id="the-card" class="card-inner bg-card-pattern border-[12px] border-white">
+                <h1 id="word-display" class="fredoka">Loading...</h1>
+            </div>
+        </div>
+
+        <button id="motion-pill" class="fixed top-24 right-4 z-40 bg-black/50 text-white font-extrabold uppercase text-sm px-4 py-2 rounded-full backdrop-blur-sm border-2 border-white/40">🎯 Motion: On</button>
+
+        <!-- Touch Fallback Zones -->
+        <div id="tap-zones" class="absolute inset-0 w-full h-full flex z-20">
+            <div id="zone-pass" class="flex-1 h-full flex items-end justify-start p-6 pb-12 cursor-pointer group">
+                <div class="bg-black/40 text-red-300 font-extrabold uppercase px-6 py-3 rounded-2xl backdrop-blur-sm opacity-50 group-hover:opacity-100 transition-opacity border-2 border-red-500/30">
+                    Tap to Pass
+                </div>
+            </div>
+            <div id="zone-correct" class="flex-1 h-full flex items-end justify-end p-6 pb-12 cursor-pointer group">
+                <div class="bg-black/40 text-green-300 font-extrabold uppercase px-6 py-3 rounded-2xl backdrop-blur-sm opacity-50 group-hover:opacity-100 transition-opacity border-2 border-green-500/30">
+                    Tap Correct
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- TILT CALIBRATION -->
+    <div id="calibration-screen" class="screen bg-slate-900 text-white p-6">
+        <div class="max-w-xl w-full text-center">
+            <h2 class="text-4xl fredoka text-yellow-400 mb-4 uppercase">Calibrate Tilt</h2>
+            <div id="cal-big" class="text-8xl mb-6">📱</div>
+            <p id="cal-text" class="text-2xl font-bold text-slate-200 mb-8">Hold the phone on your forehead, screen facing out — exactly how you play. Keep it steady.</p>
+            <button id="cal-btn" onclick="calAdvance()" class="btn-3d btn-primary w-full py-5 rounded-xl text-2xl font-extrabold uppercase tracking-wide">I'm Ready</button>
+            <button onclick="cancelCalibration()" class="w-full py-3 mt-3 text-slate-400 font-bold uppercase">Cancel</button>
+        </div>
+    </div>
+
+    <!-- RESULTS -->
+    <div id="results-screen" class="screen bg-slate-900 text-white p-6 pt-8 overflow-y-auto block">
+        <div class="max-w-2xl mx-auto bg-slate-800 p-8 rounded-3xl shadow-2xl text-center border-4 border-slate-700 mb-8 mt-12">
+            <h2 class="text-6xl fredoka mb-4 text-yellow-400">Time's Up!</h2>
+            <p class="text-xl text-slate-400 mb-4 uppercase tracking-wider font-extrabold">Final Score</p>
+            <div class="text-9xl fredoka mb-8 text-teal-400 drop-shadow-[0_0_30px_rgba(20,184,166,0.4)]" id="final-score">0</div>
+
+            <div class="text-left bg-slate-900 p-6 rounded-2xl mb-8 max-h-64 overflow-y-auto border-2 border-slate-700" id="results-list">
+                <!-- Results injected here -->
+            </div>
+
+            <div id="video-block" class="hidden mb-8 text-left">
+                <p class="text-xl text-slate-300 font-extrabold uppercase tracking-wider mb-3 text-center">🎥 Your Round Video</p>
+                <video id="round-video" class="w-full rounded-2xl border-2 border-slate-700 mb-4" controls playsinline></video>
+                <div class="flex gap-3">
+                    <a id="video-download" href="#" class="btn-3d btn-category flex-1 py-3 rounded-xl font-extrabold uppercase text-center">Download</a>
+                    <button id="video-save" onclick="saveVideoToPhone()" class="btn-3d btn-cat-green flex-1 py-3 rounded-xl font-extrabold uppercase hidden">Save to Phone</button>
+                </div>
+            </div>
+
+            <button onclick="showScreen('menu-screen'); document.body.classList.remove('playing');" class="btn-3d btn-primary w-full py-5 rounded-xl text-2xl font-extrabold uppercase tracking-wide">
+                Play Again
+            </button>
+        </div>
+    </div>
+
+    <script>
+        // --- GAME DATA & STATE ---
+        const standardDecks = {
+            "Blockbuster Movies": [
+                "The Avengers", "Titanic", "Avatar", "Star Wars",
+                "Jurassic Park", "The Matrix", "Inception", "Spider-Man",
+                "Toy Story", "The Lion King", "Harry Potter", "Gladiator",
+                "Jaws", "E.T.", "Black Panther", "Frozen",
+                "The Dark Knight", "Forrest Gump", "Shrek", "Pirates of the Caribbean",
+                "The Godfather", "Back to the Future", "The Wizard of Oz", "Raiders of the Lost Ark",
+                "The Silence of the Lambs", "Saving Private Ryan", "Pulp Fiction", "The Shawshank Redemption",
+                "The Lord of the Rings", "Finding Nemo", "Up", "WALL-E",
+                "The Incredibles", "Monsters, Inc.", "Aladdin", "Beauty and the Beast",
+                "Cinderella", "Mulan", "The Little Mermaid", "Snow White",
+                "Pinocchio", "Bambi", "Dumbo", "Deadpool",
+                "Iron Man", "Captain America", "Thor", "Guardians of the Galaxy",
+                "Wonder Woman", "Aquaman", "Superman", "Batman",
+                "Justice League", "The Hunger Games", "Twilight", "Harry Potter and the Sorcerer's Stone",
+                "Independence Day", "Men in Black", "Ghostbusters", "Rocky",
+                "Top Gun", "Mission: Impossible", "Speed", "Die Hard",
+                "Terminator 2", "Alien", "The Sixth Sense", "The Truman Show",
+                "Big", "Home Alone", "Mrs. Doubtfire", "The Sandlot",
+                "Mean Girls", "Clueless", "Freaky Friday", "Legally Blonde",
+                "Jumanji", "Grease", "The Princess Bride", "Apollo 13"
+            ],
+            "Animals": [
+                "Elephant", "Giraffe", "Kangaroo", "Penguin",
+                "Tiger", "Dolphin", "Ostrich", "Chimpanzee",
+                "Rhinoceros", "Hippopotamus", "Koala", "Cheetah",
+                "Gorilla", "Sloth", "Platypus", "Flamingo",
+                "Zebra", "Polar Bear", "Camel", "Chameleon",
+                "Lion", "Leopard", "Jaguar", "Cougar",
+                "Lynx", "Wolf", "Fox", "Coyote",
+                "Hyena", "Bear", "Moose", "Elk",
+                "Deer", "Bison", "Buffalo", "Antelope",
+                "Gazelle", "Wildebeest", "Warthog", "Meerkat",
+                "Lemur", "Baboon", "Orangutan", "Gibbon",
+                "Marmoset", "Panda", "Red Panda", "Polar Fox",
+                "Sea Otter", "Beaver", "Badger", "Raccoon",
+                "Skunk", "Squirrel", "Chipmunk", "Porcupine",
+                "Armadillo", "Anteater", "Pangolin", "Wombat",
+                "Tasmanian Devil", "Quokka", "Wallaby", "Opossum",
+                "Mole", "Bat", "Hedgehog", "Frog",
+                "Toad", "Salamander", "Newt", "Turtle",
+                "Tortoise", "Crocodile", "Alligator", "Snake",
+                "Lizard", "Gecko", "Iguana", "Komodo Dragon"
+            ],
+            "Celebrities": [
+                "Taylor Swift", "Dwayne Johnson", "Beyonce", "Tom Cruise",
+                "Kim Kardashian", "Leonardo DiCaprio", "Oprah Winfrey", "Brad Pitt",
+                "Will Smith", "Justin Bieber", "Rihanna", "Drake",
+                "Gordon Ramsay", "Snoop Dogg", "Ryan Reynolds", "Zendaya",
+                "Ed Sheeran", "Selena Gomez", "Kanye West", "Billie Eilish",
+                "Tom Hanks", "Meryl Streep", "Jennifer Lawrence", "Robert Downey Jr.",
+                "Scarlett Johansson", "Chris Hemsworth", "Emma Watson", "Daniel Radcliffe",
+                "Denzel Washington", "Morgan Freeman", "Samuel L. Jackson", "Julia Roberts",
+                "Sandra Bullock", "Angelina Jolie", "Johnny Depp", "Keanu Reeves",
+                "Nicolas Cage", "Jim Carrey", "Adam Sandler", "Kevin Hart",
+                "Steve Carell", "Tina Fey", "Amy Poehler", "Ellen DeGeneres",
+                "Jimmy Fallon", "Stephen Colbert", "Conan O'Brien", "David Letterman",
+                "Ryan Gosling", "Emma Stone", "Jennifer Aniston", "Courteney Cox",
+                "Matthew Perry", "Matt LeBlanc", "David Schwimmer", "Lisa Kudrow",
+                "Ashton Kutcher", "Mila Kunis", "Natalie Portman", "Anne Hathaway",
+                "Chris Evans", "Mark Ruffalo", "Jeremy Renner", "Paul Rudd",
+                "Brie Larson", "Chadwick Boseman", "Michael B. Jordan", "Timothee Chalamet",
+                "Margot Robbie", "Reese Witherspoon", "Hugh Jackman", "Jennifer Lopez",
+                "Chris Pratt", "Gal Gadot", "Henry Cavill", "Zac Efron",
+                "Melissa McCarthy", "Jason Momoa", "Kate Winslet", "Idris Elba"
+            ],
+            "Act It Out": [
+                "Riding a Rollercoaster", "Brushing Teeth", "Walking a Dog", "Playing Tennis",
+                "Baking a Cake", "Swimming with Sharks", "Getting a Haircut", "Building a Snowman",
+                "Driving in Traffic", "Taking a Selfie", "Putting on Makeup", "Mowing the Lawn",
+                "Juggling", "Painting a Picture", "Fishing", "Typing on a Keyboard",
+                "Yoga", "Washing a Car", "Playing Guitar", "Rock Climbing",
+                "Riding a Bike", "Skateboarding", "Surfing", "Skiing",
+                "Snowboarding", "Ice Skating", "Playing Basketball", "Playing Soccer",
+                "Playing Baseball", "Playing Golf", "Doing Push-Ups", "Lifting Weights",
+                "Jumping Rope", "Hula Hooping", "Blowing Bubbles", "Flying a Kite",
+                "Throwing a Frisbee", "Bowling", "Dancing Ballet", "Breakdancing",
+                "Singing in the Shower", "Playing Piano", "Playing Drums", "Reading a Book",
+                "Writing a Letter", "Sleeping in Class", "Sneezing", "Yawning",
+                "Laughing Hysterically", "Crying", "Getting Stung by a Bee", "Stepping on a Lego",
+                "Opening a Stuck Jar", "Parallel Parking", "Carrying Groceries", "Tying a Shoelace",
+                "Popping Balloons", "Petting a Cat", "Feeding a Baby", "Changing a Diaper",
+                "Taking Out the Trash", "Raking Leaves", "Shoveling Snow", "Planting a Garden",
+                "Wrapping a Gift", "Decorating a Tree", "Carving a Pumpkin", "Egg Hunting",
+                "Blowing Out Candles", "Making a Toast", "Shaking Hands", "High-Fiving",
+                "Waving Goodbye", "Taking a Nap", "Sipping Hot Coffee", "Eating Spaghetti",
+                "Chewing Gum", "Brushing Hair", "Playing Hide and Seek", "Doing a Cartwheel"
+            ],
+            "Food & Drink": [
+                "Pizza", "Hamburger", "Hot Dog", "Tacos",
+                "Burrito", "Sushi", "Ramen", "Pad Thai",
+                "Fried Rice", "Chicken Nuggets", "French Fries", "Onion Rings",
+                "Mozzarella Sticks", "Chicken Wings", "Nachos", "Guacamole",
+                "Salsa", "Quesadilla", "Enchilada", "Tamale",
+                "Spaghetti", "Lasagna", "Fettuccine", "Mac and Cheese",
+                "Grilled Cheese", "Peanut Butter Sandwich", "BLT", "Club Sandwich",
+                "Caesar Salad", "Greek Salad", "Cobb Salad", "Tomato Soup",
+                "Chicken Noodle Soup", "Clam Chowder", "Chili", "Beef Stew",
+                "Pot Roast", "Meatloaf", "Fried Chicken", "Barbecue Ribs",
+                "Pulled Pork", "Brisket", "Steak", "Pork Chop",
+                "Salmon", "Shrimp", "Lobster", "Crab Legs",
+                "Fish and Chips", "Shepherd's Pie", "Chicken Pot Pie", "Quiche",
+                "Omelette", "Pancakes", "Waffles", "French Toast",
+                "Bagel", "Croissant", "Donut", "Muffin",
+                "Cinnamon Roll", "Biscuit", "Cornbread", "Apple Pie",
+                "Pumpkin Pie", "Cheesecake", "Chocolate Cake", "Ice Cream",
+                "Milkshake", "Smoothie", "Lemonade", "Iced Tea",
+                "Hot Chocolate", "Coffee", "Espresso", "Soda",
+                "Root Beer", "Orange Juice", "Apple Cider", "Sparkling Water"
+            ],
+            "Sports Legends": [
+                "Michael Jordan", "LeBron James", "Kobe Bryant", "Shaquille O'Neal",
+                "Magic Johnson", "Larry Bird", "Stephen Curry", "Kevin Durant",
+                "Giannis Antetokounmpo", "Kareem Abdul-Jabbar", "Bill Russell", "Wilt Chamberlain",
+                "Tim Duncan", "Dirk Nowitzki", "Allen Iverson", "Dwyane Wade",
+                "Carmelo Anthony", "Tom Brady", "Peyton Manning", "Joe Montana",
+                "Jerry Rice", "Barry Sanders", "Walter Payton", "Emmitt Smith",
+                "Lawrence Taylor", "Aaron Rodgers", "Patrick Mahomes", "Brett Favre",
+                "Dan Marino", "John Elway", "Randy Moss", "Ray Lewis",
+                "Deion Sanders", "Babe Ruth", "Jackie Robinson", "Lou Gehrig",
+                "Hank Aaron", "Willie Mays", "Ted Williams", "Derek Jeter",
+                "Mariano Rivera", "Ken Griffey Jr.", "Barry Bonds", "Alex Rodriguez",
+                "Ichiro Suzuki", "Shohei Ohtani", "Mike Trout", "Clayton Kershaw",
+                "David Ortiz", "Wayne Gretzky", "Mario Lemieux", "Sidney Crosby",
+                "Alexander Ovechkin", "Bobby Orr", "Gordie Howe", "Connor McDavid",
+                "Serena Williams", "Venus Williams", "Roger Federer", "Rafael Nadal",
+                "Novak Djokovic", "Pete Sampras", "Andre Agassi", "Billie Jean King",
+                "Steffi Graf", "Naomi Osaka", "Coco Gauff", "Tiger Woods",
+                "Jack Nicklaus", "Arnold Palmer", "Phil Mickelson", "Rory McIlroy",
+                "Usain Bolt", "Carl Lewis", "Michael Phelps", "Katie Ledecky",
+                "Simone Biles", "Nadia Comaneci", "Muhammad Ali", "Mike Tyson"
+            ],
+            "Music Stars": [
+                "The Beatles", "The Rolling Stones", "Queen", "Led Zeppelin",
+                "Pink Floyd", "AC/DC", "Aerosmith", "Guns N' Roses",
+                "Nirvana", "Pearl Jam", "Foo Fighters", "Metallica",
+                "U2", "The Who", "The Doors", "Jimi Hendrix",
+                "Bob Dylan", "Elvis Presley", "Michael Jackson", "Madonna",
+                "Prince", "David Bowie", "Freddie Mercury", "Elton John",
+                "Stevie Wonder", "Aretha Franklin", "Whitney Houston", "Mariah Carey",
+                "Celine Dion", "Adele", "Bruno Mars", "Lady Gaga",
+                "Katy Perry", "Miley Cyrus", "Ariana Grande", "Dua Lipa",
+                "Post Malone", "The Weeknd", "Bad Bunny", "Kendrick Lamar",
+                "Jay-Z", "Eminem", "Lil Wayne", "Nicki Minaj",
+                "Cardi B", "Megan Thee Stallion", "Travis Scott", "Lizzo",
+                "Halsey", "Olivia Rodrigo", "Sabrina Carpenter", "Harry Styles",
+                "Niall Horan", "Zayn Malik", "Louis Tomlinson", "Liam Payne",
+                "Justin Timberlake", "Britney Spears", "Christina Aguilera", "Backstreet Boys",
+                "NSYNC", "Spice Girls", "Destiny's Child", "TLC",
+                "Boyz II Men", "Alicia Keys", "John Legend", "Sam Smith",
+                "Shawn Mendes", "Camila Cabello", "Charlie Puth", "Coldplay",
+                "Imagine Dragons", "Maroon 5", "Green Day", "Blink-182",
+                "Red Hot Chili Peppers", "Bon Jovi", "The Beach Boys", "Simon & Garfunkel"
+            ],
+            "Famous Places": [
+                "Eiffel Tower", "Statue of Liberty", "Great Wall of China", "Taj Mahal",
+                "Colosseum", "Pyramids of Giza", "Machu Picchu", "Christ the Redeemer",
+                "Sydney Opera House", "Big Ben", "Tower of London", "Buckingham Palace",
+                "Stonehenge", "Louvre Museum", "Notre-Dame Cathedral", "Sagrada Familia",
+                "Leaning Tower of Pisa", "Trevi Fountain", "Venice Canals", "Mount Everest",
+                "Grand Canyon", "Yellowstone", "Niagara Falls", "Yosemite",
+                "Mount Rushmore", "Golden Gate Bridge", "Hollywood Sign", "Times Square",
+                "Central Park", "Empire State Building", "White House", "Lincoln Memorial",
+                "Washington Monument", "Kennedy Space Center", "Disney World", "Disneyland",
+                "Las Vegas Strip", "Hoover Dam", "Alcatraz", "Route 66",
+                "Miami Beach", "Waikiki Beach", "Statue of Christ", "Amazon Rainforest",
+                "Sahara Desert", "Serengeti", "Victoria Falls", "Table Mountain",
+                "Petra", "Dubai Burj Khalifa", "Palm Jumeirah", "Abu Dhabi",
+                "Mecca", "Jerusalem", "Acropolis", "Parthenon",
+                "Santorini", "Mykonos", "Amsterdam Canals", "Anne Frank House",
+                "Berlin Wall", "Brandenburg Gate", "Neuschwanstein Castle", "Swiss Alps",
+                "Matterhorn", "Loch Ness", "Edinburgh Castle", "Giant's Causeway",
+                "Tower Bridge", "Cambridge University", "Oxford University", "Windsor Castle",
+                "Versailles", "Mont Saint-Michel", "Champs-Elysees", "Mona Lisa",
+                "Yellowstone Geyser", "Carlsbad Caverns", "Mount Fuji", "St. Peter's Basilica"
+            ],
+            "Jobs & Professions": [
+                "Doctor", "Nurse", "Teacher", "Firefighter",
+                "Police Officer", "Chef", "Pilot", "Astronaut",
+                "Dentist", "Lawyer", "Judge", "Farmer",
+                "Mechanic", "Plumber", "Electrician", "Carpenter",
+                "Architect", "Engineer", "Scientist", "Pharmacist",
+                "Veterinarian", "Librarian", "Mail Carrier", "Bus Driver",
+                "Taxi Driver", "Train Conductor", "Sailor", "Soldier",
+                "Barber", "Hairdresser", "Photographer", "Actor",
+                "Singer", "Dancer", "Musician", "Painter",
+                "Sculptor", "Writer", "Journalist", "Editor",
+                "Accountant", "Banker", "Cashier", "Waiter",
+                "Bartender", "Janitor", "Security Guard", "Lifeguard",
+                "Coach", "Referee", "Fitness Trainer", "Real Estate Agent",
+                "Travel Agent", "Florist", "Baker", "Butcher",
+                "Fisherman", "Lumberjack", "Miner", "Construction Worker",
+                "Roofer", "Zookeeper", "Welder", "Truck Driver",
+                "Courier", "Postal Worker", "Paramedic", "Surgeon",
+                "Optometrist", "Podiatrist", "Chiropractor", "Therapist",
+                "Social Worker", "Professor", "Principal", "Dental Hygienist",
+                "Translator", "Tour Guide", "Flight Attendant", "Customs Officer"
+            ],
+            "Around the House": [
+                "Sofa", "Coffee Table", "Bookshelf", "Dining Table",
+                "Chair", "Lamp", "Rug", "Curtains",
+                "Mirror", "Television", "Remote Control", "Refrigerator",
+                "Microwave", "Oven", "Stove", "Toaster",
+                "Blender", "Kettle", "Sink", "Faucet",
+                "Dishwasher", "Dish Rack", "Trash Can", "Broom",
+                "Mop", "Vacuum Cleaner", "Dustpan", "Sponge",
+                "Detergent", "Laundry Basket", "Washing Machine", "Dryer",
+                "Ironing Board", "Clothes Hanger", "Closet", "Dresser",
+                "Nightstand", "Bed", "Pillow", "Blanket",
+                "Mattress", "Alarm Clock", "Ceiling Fan", "Air Conditioner",
+                "Heater", "Thermostat", "Light Switch", "Doorbell",
+                "Doorknob", "Key", "Lock", "Window",
+                "Blinds", "Picture Frame", "Wall Clock", "Vase",
+                "Candle", "Flashlight", "Battery", "Extension Cord",
+                "Power Outlet", "Smoke Detector", "Fire Extinguisher", "First Aid Kit",
+                "Toolbox", "Hammer", "Screwdriver", "Wrench",
+                "Duct Tape", "Ladder", "Bucket", "Spray Bottle",
+                "Toothbrush", "Toothpaste", "Soap", "Shampoo",
+                "Towel", "Hair Dryer", "Shower Curtain", "Welcome Mat"
+            ],
+            "Video Games": [
+                "Mario", "Luigi", "Princess Peach", "Bowser",
+                "Yoshi", "Donkey Kong", "Link", "Zelda",
+                "Pikachu", "Sonic the Hedgehog", "Kirby", "Pac-Man",
+                "Master Chief", "Lara Croft", "Nathan Drake", "Kratos",
+                "Aloy", "Joel", "Ellie", "Solid Snake",
+                "Samus Aran", "Mega Man", "Crash Bandicoot", "Spyro",
+                "Sly Cooper", "Ratchet", "Clank", "Sackboy",
+                "Steve", "Alex", "Creeper", "Enderman",
+                "Frogger", "Qbert", "Dig Dug", "Space Invaders",
+                "Pong", "Tetris", "Snake", "Pitfall",
+                "Centipede", "Galaga", "Street Fighter", "Mortal Kombat",
+                "Tekken", "Super Smash Bros", "Mario Kart", "Animal Crossing",
+                "The Sims", "SimCity", "Civilization", "Stardew Valley",
+                "Among Us", "Fortnite", "Roblox", "Minecraft",
+                "Grand Theft Auto", "Call of Duty", "Halo", "Overwatch",
+                "League of Legends", "Dota", "World of Warcraft", "Final Fantasy",
+                "Pokemon", "Digimon", "Kingdom Hearts", "Resident Evil",
+                "Silent Hill", "Doom", "Quake", "Half-Life",
+                "Portal", "Team Fortress", "Counter-Strike", "Rocket League",
+                "Fall Guys", "Angry Birds", "Candy Crush", "Elden Ring"
+            ],
+            "TV Shows": [
+                "Friends", "Seinfeld", "The Simpsons", "Family Guy",
+                "South Park", "The Office", "Parks and Recreation", "Brooklyn Nine-Nine",
+                "Community", "How I Met Your Mother", "The Big Bang Theory", "Modern Family",
+                "Cheers", "Frasier", "Everybody Loves Raymond", "King of Queens",
+                "Two and a Half Men", "Scrubs", "Grey's Anatomy", "ER",
+                "House", "Law and Order", "CSI", "NCIS",
+                "Criminal Minds", "Bones", "Castle", "The Mentalist",
+                "Monk", "Psych", "Stranger Things", "The Walking Dead",
+                "Game of Thrones", "Breaking Bad", "Better Call Saul", "Lost",
+                "Prison Break", "24", "Homeland", "Dexter",
+                "Sherlock", "Doctor Who", "Star Trek", "Battlestar Galactica",
+                "The X-Files", "Buffy the Vampire Slayer", "Charmed", "Supernatural",
+                "Smallville", "The Flash", "Arrow", "Gotham",
+                "The Mandalorian", "WandaVision", "Loki", "The Boys",
+                "Squid Game", "The Crown", "Downton Abbey", "Mad Men",
+                "The Sopranos", "The Wire", "Deadwood", "Boardwalk Empire",
+                "Sesame Street", "Mister Rogers' Neighborhood", "Barney", "Teletubbies",
+                "Blue's Clues", "Dora the Explorer", "SpongeBob SquarePants", "Rugrats",
+                "Hey Arnold", "Doug", "Rocko's Modern Life", "Dragon Ball Z",
+                "Sailor Moon", "Avatar: The Last Airbender", "The Flintstones", "Tom and Jerry"
+            ],
+            "Accents & Impressions": [
+                "Pirate Captain", "News Anchor", "Surfer Dude", "Southern Belle",
+                "Cowboy", "British Royal", "French Waiter", "Italian Chef",
+                "Russian Spy", "German Tourist", "Australian Bushman", "Scottish Highlander",
+                "Irish Leprechaun", "New York Cab Driver", "Valley Girl", "Used Car Salesman",
+                "Game Show Host", "Weather Forecaster", "Sports Announcer", "Opera Singer",
+                "Movie Trailer Voice", "Robot", "Evil Villain", "Mad Scientist",
+                "Fortune Teller", "Hippie", "Biker", "Nerd",
+                "Jock", "Cheerleader", "Goth", "Punk Rocker",
+                "Disco Star", "Country Singer", "Rapper", "Preacher",
+                "Politician", "Army General", "Drill Sergeant", "Navy Seal",
+                "Airline Pilot", "Toddler", "Teenager", "Grandpa",
+                "Grandma", "Baby", "Vampire", "Werewolf",
+                "Zombie", "Ghost", "Witch", "Wizard",
+                "Fairy", "Mermaid", "Alien", "Caveman",
+                "King", "Queen", "Knight", "Ninja",
+                "Samurai", "Cowgirl", "Umpire", "News Reporter",
+                "Radio DJ", "Auctioneer", "Flight Controller", "Siri",
+                "GPS Voice", "Movie Critic", "Superhero", "Detective",
+                "Genie", "Elf", "Clown", "Magician",
+                "Puppet", "Ringmaster", "Mime", "Ventriloquist"
+            ],
+            "That's So 90s": [
+                "Fanny Pack", "Walkman", "Discman", "Cassette Tape",
+                "VHS Tape", "Blockbuster Video", "Beanie Baby", "Tamagotchi",
+                "Furby", "Game Boy", "Nintendo 64", "Sega Genesis",
+                "Super Nintendo", "PlayStation", "Pogs", "Slap Bracelet",
+                "Trapper Keeper", "Lisa Frank", "Jelly Shoes", "Platform Sneakers",
+                "Doc Martens", "Flannel Shirt", "Overalls", "Scrunchie",
+                "Butterfly Clips", "Choker", "Belly Button Ring", "Frosted Tips",
+                "Curtained Hair", "The Rachel", "Bowl Cut", "Mullet",
+                "Yo-Yo", "Pogo Stick", "Skip-It", "Moon Shoes",
+                "Easy-Bake Oven", "Polly Pocket", "Lite-Brite", "Etch A Sketch",
+                "Skip-Bo", "Jenga", "Pokemon Cards", "Magic Cards",
+                "Dunkaroos", "Gushers", "Fruit Roll-Ups", "Ring Pops",
+                "Warheads", "Push Pops", "AOL Instant Messenger", "Cabbage Patch Kids",
+                "Power Rangers", "Teenage Mutant Ninja Turtles", "Goosebumps Books", "The Fresh Prince",
+                "Saved by the Bell", "Full House", "Boy Meets World", "Home Improvement",
+                "Clarissa Explains It All", "All That", "Kenan & Kel", "Nickelodeon Slime",
+                "Capri Sun", "Lunchables", "Surge Soda", "Crystal Pepsi",
+                "Dial-Up Internet", "Floppy Disk", "Soundgarden", "Alice in Chains",
+                "Sublime", "No Doubt", "Smash Mouth", "Sugar Ray",
+                "Tupac", "Notorious B.I.G.", "Dr. Dre", "Wu-Tang Clan"
+            ],
+            "Kids' Favorites": [
+                "Dog", "Cat", "Cow", "Pig",
+                "Duck", "Chicken", "Horse", "Sheep",
+                "Goat", "Rabbit", "Mouse", "Bird",
+                "Fish", "Bee", "Ant", "Spider",
+                "Butterfly", "Ladybug", "Owl", "Monkey",
+                "Apple", "Banana", "Orange", "Grapes",
+                "Strawberry", "Watermelon", "Carrot", "Corn",
+                "Peas", "Broccoli", "Potato", "Bread",
+                "Cheese", "Milk", "Egg", "Cookie",
+                "Cake", "Candy", "Popcorn", "Juice",
+                "Ball", "Doll", "Teddy Bear", "Blocks",
+                "Puzzle", "Kite", "Bike", "Swing",
+                "Slide", "Sandbox", "Balloon", "Bubble",
+                "Crayon", "Paint", "Book", "Song",
+                "Dance", "Jump", "Run", "Hop",
+                "Clap", "Smile", "Hug", "Kiss",
+                "Nap", "Bath", "Pajamas", "Shoes",
+                "Hat", "Car", "Sun", "Moon",
+                "Star", "Rainbow", "Cloud", "Flower",
+                "Tree", "Grass", "Rock", "Sand"
+            ]
+        };
+
+        let currentDeck = [];
+        let deckName = "";
+        let currentCardIndex = 0;
+        let score = 0;
+        let timeLeft = 60;
+        let gameInterval = null;
+        let playedWords = []; // Store objects {word: '...', correct: true/false}
+        let isProcessingTilt = false;
+        let lastMotionTime = 0;
+        let tiltState = 'armed';
+        let neutralSince = 0;
+        let lastZ = null;
+        let lastGamma = null;
+        let lastBeta = null;
+        let tiltBase = null;
+        let fullDeck = [];
+
+        // Fisher-Yates shuffle (replaces the old random-sort)
+        function shuffle(arr) {
+            const a = [...arr];
+            for (let i = a.length - 1; i > 0; i--) {
+                const j = Math.floor(Math.random() * (i + 1));
+                [a[i], a[j]] = [a[j], a[i]];
+            }
+            return a;
+        }
+
+        function dedupe(list) {
+            const seen = new Set();
+            return list.filter(w => {
+                const k = String(w).trim().toLowerCase();
+                if (!k || seen.has(k)) return false;
+                seen.add(k);
+                return true;
+            });
+        }
+
+        // Fallback deck builder from the local word bank — used when the
+        // Gemini API is unreachable or returns too few usable cards.
+        function buildCustomDeck(topic) {
+            const t = String(topic || '').trim().toLowerCase();
+            if (t) {
+                for (const name of Object.keys(standardDecks)) {
+                    if (name.toLowerCase() === t) return [...standardDecks[name]];
+                }
+                for (const name of Object.keys(standardDecks)) {
+                    const n = name.toLowerCase();
+                    if (n.includes(t) || t.includes(n)) return [...standardDecks[name]];
+                }
+                let best = null, bestHits = 0;
+                for (const name of Object.keys(standardDecks)) {
+                    const hits = standardDecks[name].filter(w => w.toLowerCase().includes(t)).length;
+                    if (hits > bestHits) { bestHits = hits; best = name; }
+                }
+                if (best && bestHits >= 3) return [...standardDecks[best]];
+            }
+            // No match (or Local & Now): a mix from every deck.
+            const all = Object.values(standardDecks).flat();
+            return shuffle(all).slice(0, 80);
+        }
+
+        function showScreen(screenId) {
+            document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+            document.getElementById(screenId).classList.add('active');
+        }
+
+        // --- GEMINI API INTEGRATION ---
+        async function fetchGeminiCards(promptText) {
+            if (!apiKey) return []; // Public web build: no key ships — custom decks use the local word bank.
+            const apiKey = '';
+            // Model chain with retries: free-tier capacity errors (503 "high
+            // demand") are transient — retry with backoff, then drop to the
+            // lighter Lite model before giving up to the word bank.
+            const MODELS = ['gemini-3.5-flash-lite', 'gemini-3.8-flash'];
+            const wait = ms => new Promise(r => setTimeout(r, ms));
+            const setLoad = t => { const el = document.querySelector('#loading-ui p'); if (el) el.textContent = t; };
+            for (const model of MODELS) {
+                const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+                for (let attempt = 0; attempt < 3; attempt++) {
+                    let response, data;
+                    try {
+                        response = await fetch(url, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                contents: [{ parts: [{ text: promptText }] }],
+                                generationConfig: {
+                                    responseMimeType: "application/json",
+                                    responseSchema: { type: "ARRAY", items: { type: "STRING" } }
+                                }
+                            })
+                        });
+                        data = await response.json();
+                    } catch (e) {
+                        // Network-level failure: one retry, then next model.
+                        window.__lastGeminiError = String(e && e.message || e);
+                        if (attempt === 0) { await wait(1200); continue; }
+                        break;
+                    }
+                    if (!response.ok) {
+                        const msg = (data && data.error && data.error.message) || ('HTTP ' + response.status);
+                        window.__lastGeminiError = msg;
+                        const busy = response.status === 503 || /high demand|overloaded|try again later/i.test(msg);
+                        const gone = response.status === 404 || /no longer available|not found/i.test(msg);
+                        if (busy && attempt < 2) { setLoad('Gemini is busy — retrying...'); await wait(1500 * (attempt + 1)); continue; }
+                        if (busy || gone) break; // try the next model
+                        return ["Error Generating", "Check Connection", "Try Again", "Fallback Card 1", "Fallback Card 2"]; // hard error — stop
+                    }
+                    const text = data.candidates?.[0]?.content?.parts?.[0]?.text;
+                    if (text) { try { return JSON.parse(text); } catch (e) { break; } }
+                    break; // unexpected body shape — next model
+                }
+            }
+            return ["Error Generating", "Check Connection", "Try Again", "Fallback Card 1", "Fallback Card 2"];
+        }
+
+        async function prepareGame(type, topic = "") {
+            const topicInput = document.getElementById('custom-topic').value;
+
+            showScreen('prep-screen');
+            document.getElementById('loading-ui').classList.remove('hidden');
+            document.getElementById('prep-instructions').classList.add('hidden');
+
+            if (type === 'standard') {
+                deckName = topic;
+                fullDeck = [...standardDecks[topic]];
+                currentDeck = shuffle(fullDeck);
+                setTimeout(showInstructions, 500);
+            }
+            else if (type === 'custom') {
+                if (!topicInput.trim()) {
+                    alert("Please enter a category!");
+                    showScreen('menu-screen');
+                    return;
+                }
+                deckName = topicInput;
+                window.__lastGeminiError = null;
+                const lp = document.querySelector('#loading-ui p');
+                if (lp) lp.textContent = 'Asking Gemini for fresh cards...';
+                let cards = null;
+                try {
+                    cards = await fetchGeminiCards('Generate 60 unique, fun, family-friendly words or short phrases for a Heads Up charades guessing category about: "' + topicInput + '". Mix easy and tricky ones. No duplicates.');
+                } catch (e) { cards = null; }
+                if (Array.isArray(cards)) cards = cards.filter(w => typeof w === 'string' && w.trim() && !/error generating|check connection|try again|fallback card/i.test(w)).map(w => w.trim());
+                let usedFallback = false;
+                if (cards && cards.length >= 12) fullDeck = dedupe(cards);
+                else { fullDeck = buildCustomDeck(topicInput); usedFallback = true; }
+                currentDeck = shuffle(fullDeck);
+                if (usedFallback && window.__lastGeminiError) {
+                    if (lp) lp.textContent = 'Gemini said: ' + window.__lastGeminiError + ' — using the word bank instead.';
+                    setTimeout(showInstructions, 3200);
+                } else setTimeout(showInstructions, 500);
+            }
+            else if (type === 'local') {
+                deckName = "Local & Now";
+                fullDeck = buildCustomDeck('');
+                currentDeck = shuffle(fullDeck);
+                setTimeout(showInstructions, 500);
+            }
+        }
+
+        function showInstructions() {
+            document.getElementById('loading-ui').classList.add('hidden');
+            document.getElementById('prep-instructions').classList.remove('hidden');
+        }
+
+        // --- MOTION SENSOR LOGIC ---
+        async function requestSensorsAndStart() {
+            if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+                try { await DeviceMotionEvent.requestPermission(); } catch (e) { console.error("Motion denied", e); }
+            }
+            if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+                try { await DeviceOrientationEvent.requestPermission(); } catch (e) { console.error("Orientation denied", e); }
+            }
+
+            window.addEventListener('devicemotion', handleMotion);
+            window.addEventListener('deviceorientation', handleOrientation);
+
+            document.body.classList.add('playing');
+
+            if (window.innerHeight > window.innerWidth) {
+                window.addEventListener('orientationchange', onOrientationChangeDuringPrep);
+                window.addEventListener('resize', onResizeDuringPrep);
+            } else {
+                startGameRound();
+            }
+        }
+
+        function onOrientationChangeDuringPrep() {
+            if (window.innerWidth > window.innerHeight) {
+                window.removeEventListener('orientationchange', onOrientationChangeDuringPrep);
+                window.removeEventListener('resize', onResizeDuringPrep);
+                startGameRound();
+            }
+        }
+        function onResizeDuringPrep() {
+             if (window.innerWidth > window.innerHeight) {
+                window.removeEventListener('orientationchange', onOrientationChangeDuringPrep);
+                window.removeEventListener('resize', onResizeDuringPrep);
+                startGameRound();
+            }
+        }
+
+        // --- GAME LOOP ---
+        function startGameRound() {
+            window.removeEventListener('orientationchange', onOrientationChangeDuringPrep);
+            window.removeEventListener('resize', onResizeDuringPrep);
+
+            score = 0; currentCardIndex = 0; playedWords = [];
+            document.getElementById('current-deck-name').innerText = deckName;
+
+            showScreen('countdown-screen');
+            let count = 3;
+            const countEl = document.getElementById('countdown-number');
+            countEl.innerText = count;
+            soundFX.tick();
+
+            anime({ targets: countEl, scale: [0.5, 1], opacity: [0, 1], duration: 500, easing: 'easeOutElastic(1, .8)' });
+
+            const countInt = setInterval(() => {
+                count--;
+                if (count > 0) {
+                    countEl.innerText = count;
+                    soundFX.tick();
+                    anime({ targets: countEl, scale: [0.5, 1], opacity: [0, 1], duration: 500, easing: 'easeOutElastic(1, .8)' });
+                } else {
+                    clearInterval(countInt);
+                    soundFX.start();
+                    beginTimer();
+                }
+            }, 1000);
+        }
+
+        function beginTimer() {
+            // Calibrate tilt to the player's forehead pose right now.
+            tiltBase = { z: (lastZ === null ? 0 : lastZ), g: lastGamma, b: lastBeta };
+            tiltState = 'armed'; neutralSince = 0;
+            showScreen('game-screen');
+            const vb = document.getElementById('video-block'); if (vb) vb.classList.add('hidden');
+            startRecording();
+            timeLeft = 60;
+            updateUI();
+            showNextCard();
+
+            gameInterval = setInterval(() => {
+                timeLeft--;
+                document.getElementById('timer').innerText = timeLeft;
+                if (timeLeft <= 5 && timeLeft > 0) soundFX.chime();
+                if (timeLeft <= 0) endGame();
+            }, 1000);
+        }
+
+        function showNextCard() {
+            if (currentCardIndex >= currentDeck.length) {
+                // Refill ONLY with words not yet played this game — no recycling.
+                // A fresh full shuffle happens only once every word has been played.
+                const playedSet = new Set(playedWords.map(p => p.word));
+                let pool = fullDeck.filter(w => !playedSet.has(w));
+                if (pool.length === 0) pool = [...fullDeck];
+                currentDeck = shuffle(pool);
+                currentCardIndex = 0;
+            }
+
+            const cardEl = document.getElementById('the-card');
+            document.getElementById('word-display').innerText = currentDeck[currentCardIndex];
+
+            anime({ targets: cardEl, scale: [0.8, 1], opacity: [0, 1], duration: 400, easing: 'easeOutElastic(1, .6)' });
+
+            setTimeout(() => { isProcessingTilt = false; }, 150);
+        }
+
+        // --- TILT DETECTOR (dual channel, calibrated to the player) ---
+        // Z-only detection failed on Remaur's phone: his nods are shallow in z
+        // (up-nod peaked +4.1, under the old 5.0 trigger) but huge in gamma
+        // (down-nod swung gamma -81 deg in landscape). So: baseline = forehead
+        // pose when the round starts. CORRECT = gamma plunge with z falling,
+        // or a strong negative z alone. PASS = z rising well above baseline.
+        // Neutral latch: no re-fire until the pose returns near baseline.
+        function handleMotion(event) {
+            const z = event.accelerationIncludingGravity?.z;
+            if (z === null || z === undefined) return;
+            lastZ = z;
+            if (document.getElementById('game-screen').classList.contains('active')) evaluateTilt();
+        }
+
+        function handleOrientation(event) {
+            if (event.gamma === null || event.gamma === undefined) return;
+            lastGamma = event.gamma;
+            lastBeta = event.beta;
+            if (document.getElementById('game-screen').classList.contains('active')) evaluateTilt();
+        }
+
+        function evaluateTilt() {
+            if (!tiltBase || !motionOn) return;
+            const dz = (lastZ === null) ? 0 : lastZ - tiltBase.z;
+            const dgRaw = (lastGamma === null || tiltBase.g === null) ? 0 : lastGamma - tiltBase.g;
+            const dbRaw = (lastBeta === null || tiltBase.b === null || tiltBase.b === undefined) ? 0 : lastBeta - tiltBase.b;
+            const now = Date.now();
+
+            if (tiltCal && tiltCal.down && tiltCal.up) {
+                // CALIBRATED mode: project the live delta onto the two nod
+                // directions Remaur recorded. Channel-agnostic, so folded
+                // and unfolded behave the same. Down nod = PASS, up = CORRECT.
+                const dLen = Math.hypot(dz, dgRaw, dbRaw);
+                const minExc = Math.min(tiltCal.down.len, tiltCal.up.len);
+                if (tiltState === 'locked') {
+                    if (dLen <= Math.max(2.5, minExc * 0.22)) {
+                        if (!neutralSince) neutralSince = now;
+                        if (now - neutralSince >= 250) { tiltState = 'armed'; neutralSince = 0; }
+                    } else neutralSince = 0;
+                    return;
+                }
+                if (isProcessingTilt || now - lastMotionTime < 250) return;
+                const sDown = (dz * tiltCal.down.z + dgRaw * tiltCal.down.g + dbRaw * tiltCal.down.b) / tiltCal.down.len;
+                const sUp = (dz * tiltCal.up.z + dgRaw * tiltCal.up.g + dbRaw * tiltCal.up.b) / tiltCal.up.len;
+                if (sDown >= tiltCal.down.len * 0.55 && sDown >= sUp + 4) {
+                    tiltState = 'locked'; neutralSince = 0; lastMotionTime = now;
+                    handleTilt('pass');
+                } else if (sUp >= tiltCal.up.len * 0.55 && sUp >= sDown + 4) {
+                    tiltState = 'locked'; neutralSince = 0; lastMotionTime = now;
+                    handleTilt('correct');
+                }
+                return;
+            }
+
+            // UNCALIBRATED fallback (original heuristics, mapping corrected to
+            // Remaur's model: down nod = PASS, up nod = CORRECT).
+            const dgAbs = (lastGamma === null || tiltBase.g === null) ? 0 : Math.abs(tiltBase.g) - Math.abs(lastGamma);
+            const inNeutral = Math.abs(dz) <= 0.8 && Math.abs(dgRaw) <= 6;
+            if (tiltState === 'locked') {
+                if (inNeutral) {
+                    if (!neutralSince) neutralSince = now;
+                    if (now - neutralSince >= 300) { tiltState = 'armed'; neutralSince = 0; }
+                } else neutralSince = 0;
+                return;
+            }
+            if (isProcessingTilt) return;
+            if (now - lastMotionTime < 250) return;
+
+            if ((dgAbs >= 32 && dz <= 0.5) || dz >= 3.0) {
+                tiltState = 'locked'; neutralSince = 0; lastMotionTime = now;
+                handleTilt('pass');
+            } else if (dz <= -3.6 || (dgAbs <= -14 && dz <= 0.5)) {
+                tiltState = 'locked'; neutralSince = 0; lastMotionTime = now;
+                handleTilt('correct');
+            }
+        }
+
+        function handleTilt(action) {
+            if (isProcessingTilt) return;
+            isProcessingTilt = true;
+
+            const screen = document.getElementById('game-screen');
+            const cardEl = document.getElementById('the-card');
+            const currentWord = currentDeck[currentCardIndex];
+
+            screen.className = 'screen active';
+            let animationDir = 0;
+
+            if (action === 'correct') {
+                soundFX.correct();
+                score++;
+                playedWords.push({word: currentWord, correct: true});
+                screen.classList.add('game-state-correct');
+                animationDir = -100;
+            } else {
+                soundFX.pass();
+                playedWords.push({word: currentWord, correct: false});
+                screen.classList.add('game-state-pass');
+                animationDir = 100;
+            }
+
+            updateUI();
+
+            anime({
+                targets: cardEl,
+                translateY: animationDir,
+                opacity: 0,
+                rotateX: action === 'correct' ? 45 : -45,
+                duration: 300,
+                easing: 'easeInQuad',
+                complete: () => {
+                    cardEl.style.transform = 'none';
+                    cardEl.style.opacity = 1;
+                    setTimeout(() => {
+                        screen.className = 'screen active game-state-normal';
+                        currentCardIndex++;
+                        showNextCard();
+                    }, 100);
+                }
+            });
+        }
+
+        function updateUI() {
+            document.getElementById('score-display').innerText = score;
+            document.getElementById('timer').innerText = timeLeft;
+        }
+
+        function endGame() {
+            clearInterval(gameInterval);
+            stopRecording();
+            soundFX.end();
+            window.removeEventListener('devicemotion', handleMotion);
+            window.removeEventListener('deviceorientation', handleOrientation);
+            tiltBase = null;
+
+            document.getElementById('final-score').innerText = score;
+            const resultsList = document.getElementById('results-list');
+            resultsList.innerHTML = '';
+
+            if(playedWords.length === 0) {
+                resultsList.innerHTML = '<p class="text-slate-400 italic text-center font-bold text-xl">Did you even play?!</p>';
+            } else {
+                playedWords.forEach(item => {
+                    const p = document.createElement('p');
+                    if(item.correct) {
+                        p.className = 'text-green-400 font-extrabold text-xl mb-3 border-b border-slate-700 pb-2 flex items-center';
+                        p.innerHTML = `<span class="text-2xl mr-3">✓</span> ${item.word}`;
+                    } else {
+                        p.className = 'text-red-400 font-bold text-lg mb-3 border-b border-slate-700 pb-2 flex items-center opacity-75';
+                        p.innerHTML = `<span class="text-xl mr-3 text-red-500">✗</span> <span class="line-through">${item.word}</span>`;
+                    }
+                    resultsList.appendChild(p);
+                });
+            }
+            showScreen('results-screen');
+        }
+
+
+
+        // --- MOTION TOGGLE + TILT CALIBRATION ---
+        let motionOn = true;
+        try { motionOn = localStorage.getItem('hu_motion') !== '0'; } catch (e) {}
+        let tiltCal = null;
+        try { tiltCal = JSON.parse(localStorage.getItem('hu_tilt_cal') || 'null'); } catch (e) { tiltCal = null; }
+
+        function setMotion(on) {
+            motionOn = !!on;
+            try { localStorage.setItem('hu_motion', motionOn ? '1' : '0'); } catch (e) {}
+            syncMotionUI();
+        }
+        function syncMotionUI() {
+            const pill = document.getElementById('motion-pill');
+            if (pill) pill.textContent = motionOn ? '🎯 Motion: On' : '👆 Motion: Off';
+            const t = document.getElementById('motion-toggle');
+            if (t) t.checked = motionOn;
+            const cs = document.getElementById('cal-status');
+            if (cs) cs.textContent = tiltCal ? 'Tilt calibrated ✓ — your own nods are the triggers.' : 'Tilt not calibrated yet — calibration makes it work folded or unfolded.';
+        }
+
+        let calStep = 0, calSamples = [], calBase = null, calDownVec = null;
+        function calCapture(ms, done) {
+            calSamples = [];
+            const iv = setInterval(() => { if (lastZ !== null || lastGamma !== null) calSamples.push({ z: lastZ || 0, g: lastGamma || 0, b: lastBeta || 0 }); }, 50);
+            setTimeout(() => { clearInterval(iv); done(calSamples.slice()); }, ms);
+        }
+        function startCalibration() {
+            window.addEventListener('devicemotion', handleMotion);
+            window.addEventListener('deviceorientation', handleOrientation);
+            calStep = 0; calBase = null; calDownVec = null;
+            showScreen('calibration-screen');
+            calSetUI('📱', 'Hold the phone on your forehead, screen facing out — exactly how you play. Keep it steady.', "I'm Ready");
+        }
+        function calSetUI(big, text, btn) {
+            document.getElementById('cal-big').textContent = big;
+            document.getElementById('cal-text').textContent = text;
+            const b = document.getElementById('cal-btn');
+            b.textContent = btn; b.disabled = false;
+        }
+        function calAdvance() {
+            const btn = document.getElementById('cal-btn');
+            if (calStep === 0) {
+                btn.disabled = true; btn.textContent = 'Hold still…';
+                calCapture(900, (s) => {
+                    if (!s.length) { calSetUI('⚠️', 'No sensor data came in. Motion may be blocked on this device — you can still play with taps.', 'Try Again'); return; }
+                    calBase = s.reduce((a, p) => ({ z: a.z + p.z / s.length, g: a.g + p.g / s.length, b: a.b + p.b / s.length }), { z: 0, g: 0, b: 0 });
+                    calStep = 1;
+                    calSetUI('⬇️', 'Now do ONE clear nod DOWN — your PASS motion — then come back to level.', 'Start Nod');
+                });
+            } else if (calStep === 1 || calStep === 2) {
+                const isDown = calStep === 1;
+                btn.disabled = true; btn.textContent = 'Nod now!';
+                calCapture(3500, (s) => {
+                    let best = null, bestLen = 0;
+                    s.forEach(p => { const d = { z: p.z - calBase.z, g: p.g - calBase.g, b: p.b - calBase.b }; const L = Math.hypot(d.z, d.g, d.b); if (L > bestLen) { bestLen = L; best = d; } });
+                    if (!best || bestLen < 8) { calSetUI('⚠️', "Didn't catch that nod — make it one clear, deliberate nod.", 'Try Again'); return; }
+                    best.len = bestLen;
+                    if (isDown) {
+                        calDownVec = best; calStep = 2;
+                        calSetUI('⬆️', 'Now ONE clear nod UP — your CORRECT motion — then back to level.', 'Start Nod');
+                    } else {
+                        tiltCal = { down: calDownVec, up: best };
+                        try { localStorage.setItem('hu_tilt_cal', JSON.stringify(tiltCal)); } catch (e) {}
+                        calStep = 3;
+                        calCleanup();
+                        syncMotionUI();
+                        calSetUI('✅', 'Calibration saved! Down nod = Pass, up nod = Correct — measured from your phone, folded or unfolded.', 'Done');
+                    }
+                });
+            } else {
+                cancelCalibration();
+            }
+        }
+        function calCleanup() {
+            window.removeEventListener('devicemotion', handleMotion);
+            window.removeEventListener('deviceorientation', handleOrientation);
+        }
+        function cancelCalibration() { calCleanup(); showScreen('menu-screen'); }
+
+        (function initMotion() {
+            syncMotionUI();
+            const pill = document.getElementById('motion-pill');
+            if (pill) {
+                pill.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); setMotion(!motionOn); });
+                pill.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); });
+            }
+        })();
+
+        // --- ROUND VIDEO RECORDER (opt-in; the real game's selfie mode) ---
+        let recordWanted = false;
+        let camStream = null, mediaRecorder = null, recordedChunks = [], lastVideoUrl = null, lastVideoType = 'video/webm';
+        try { recordWanted = localStorage.getItem('hu_record') === '1'; } catch (e) {}
+        function setRecordWanted(on) { recordWanted = !!on; try { localStorage.setItem('hu_record', recordWanted ? '1' : '0'); } catch (e) {} }
+
+        async function startRecording() {
+            if (!recordWanted || !navigator.mediaDevices || !window.MediaRecorder) return;
+            const constraints = { video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } } };
+            try {
+                try { camStream = await navigator.mediaDevices.getUserMedia({ video: constraints.video, audio: true }); }
+                catch (e) { camStream = await navigator.mediaDevices.getUserMedia(constraints); }
+            } catch (e) { camStream = null; return; }
+            // No live preview (Remaur, 2026-11-20) — the video appears on the results screen.
+            recordedChunks = [];
+            const mime = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm', 'video/mp4'].find(m => { try { return MediaRecorder.isTypeSupported(m); } catch (e) { return false; } });
+            try {
+                mediaRecorder = new MediaRecorder(camStream, mime ? { mimeType: mime } : undefined);
+                lastVideoType = mediaRecorder.mimeType || 'video/webm';
+                mediaRecorder.ondataavailable = e => { if (e.data && e.data.size) recordedChunks.push(e.data); };
+                mediaRecorder.onstop = finishRecording;
+                mediaRecorder.start(1000);
+            } catch (e) { mediaRecorder = null; }
+        }
+
+        function stopRecording() {
+            if (mediaRecorder && mediaRecorder.state !== 'inactive') { try { mediaRecorder.stop(); } catch (e) {} }
+            mediaRecorder = null;
+            if (camStream) { camStream.getTracks().forEach(t => t.stop()); camStream = null; }
+
+        }
+
+        function finishRecording() {
+            if (!recordedChunks.length) return;
+            const blob = new Blob(recordedChunks, { type: lastVideoType });
+            if (lastVideoUrl) URL.revokeObjectURL(lastVideoUrl);
+            lastVideoUrl = URL.createObjectURL(blob);
+            const block = document.getElementById('video-block');
+            const vid = document.getElementById('round-video');
+            if (block && vid) { vid.src = lastVideoUrl; block.classList.remove('hidden'); }
+            const dl = document.getElementById('video-download');
+            if (dl) { dl.href = lastVideoUrl; dl.download = 'heads-up-round.' + (lastVideoType.includes('mp4') ? 'mp4' : 'webm'); }
+        }
+
+        function saveVideoToPhone() {
+            if (!recordedChunks.length || !window.HUAndroid) return;
+            const blob = new Blob(recordedChunks, { type: lastVideoType });
+            const reader = new FileReader();
+            reader.onload = () => {
+                const b64 = String(reader.result).split(',')[1];
+                window.HUAndroid.saveVideo(b64, 'heads-up-round.' + (lastVideoType.includes('mp4') ? 'mp4' : 'webm'));
+            };
+            reader.readAsDataURL(blob);
+        }
+
+        // Init: reflect the saved toggle state; the APK bridge adds Save.
+        (function initRecorder() {
+            const t = document.getElementById('record-toggle');
+            if (t) t.checked = recordWanted;
+            if (window.HUAndroid) { const b = document.getElementById('video-save'); if (b) b.classList.remove('hidden'); }
+        })();
+
+        // Touch zones fire on PRESS (pointerdown), not click — no tap delay,
+        // no missed taps. Same handleTilt path as the gyro.
+        document.getElementById('zone-pass').addEventListener('pointerdown', (e) => { e.preventDefault(); handleTilt('pass'); });
+        document.getElementById('zone-correct').addEventListener('pointerdown', (e) => { e.preventDefault(); handleTilt('correct'); });
+    </script>
+</body>
+</html>
