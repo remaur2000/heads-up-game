@@ -1279,6 +1279,7 @@ function startTiltCalibration(callbacks) {
     // 'down' / 'up' trajectory accumulators
     peakAngle: 0,
     peakG: null,
+    dirTan: null,
     returnSince: 0,
     gDown: null,
     downTan: null,
@@ -1352,6 +1353,7 @@ function _stepCalibration(now) {
         cal.stepStartedAt = now;
         cal.peakAngle = 0;
         cal.peakG = null;
+        cal.dirTan = null;
         cal.returnSince = 0;
         if (typeof cal.cb.onStep === 'function') {
           cal.cb.onStep('down', 'Nod DOWN (Pass), then return to level');
@@ -1370,12 +1372,22 @@ function _stepCalibration(now) {
   if (cal.step === 'down' || cal.step === 'up') {
     const angle = _vecAngleDeg(g, cal.gRest);
 
-    // During 'up', only track samples moving opposite to the recorded 'down' tangent
-    let validDirection = true;
-    if (cal.step === 'up' && cal.downTan && angle > 6) {
+    // Direction-aware peak tracking [INTEGRATION FIX, 2026-11-20]: the first
+    // clear excursion of the step defines its direction (dirTan); only
+    // samples still moving that way may raise the peak. In v1.4 the peak was
+    // direction-blind, so a nod's rebound overshoot past level — often
+    // LARGER than the nod itself — could be recorded as the peak, silently
+    // flipping the calibrated pass/correct mapping on Remaur's phone.
+    let validDirection = false;
+    if (angle > 6) {
       const tan = _vecNormalize(_vecSub(g, _vecScale(cal.gRest, _vecDot(g, cal.gRest))));
-      if (!tan || _vecDot(tan, cal.downTan) > TILT_CFG.calOppositeDotMax) {
-        validDirection = false;
+      if (tan) {
+        if (!cal.dirTan && angle >= 10) {
+          if (cal.step === 'down' || !cal.downTan || _vecDot(tan, cal.downTan) <= TILT_CFG.calOppositeDotMax) {
+            cal.dirTan = tan;
+          }
+        }
+        validDirection = !!cal.dirTan && _vecDot(tan, cal.dirTan) > 0.3;
       }
     }
 
@@ -1420,6 +1432,7 @@ function _stepCalibration(now) {
         cal.stepStartedAt = now;
         cal.peakAngle = 0;
         cal.peakG = null;
+        cal.dirTan = null;
         cal.returnSince = 0;
         if (typeof cal.cb.onStep === 'function') {
           cal.cb.onStep('up', 'Now nod UP (Correct), then return to level');
@@ -1810,6 +1823,7 @@ function _finalizeCalibration(cal) {
             stopRecording();
             soundFX.end();
             pauseSensors();
+            document.body.classList.remove('playing');
 
             document.getElementById('final-score').innerText = score;
             const resultsList = document.getElementById('results-list');
