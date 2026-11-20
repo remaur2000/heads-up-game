@@ -77,7 +77,20 @@
     <!-- Audio Synthesis -->
     <script>
         const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        let appMuted = false;
+        function setAppMuted(m) {
+            appMuted = !!m;
+            try {
+                if (appMuted) { if (audioCtx.state === 'running') audioCtx.suspend(); }
+                else if (audioCtx.state === 'suspended') { audioCtx.resume(); }
+            } catch (e) {}
+        }
+        document.addEventListener('visibilitychange', () => setAppMuted(document.hidden));
+        window.addEventListener('pagehide', () => setAppMuted(true));
+        window.__onAppBackground = () => setAppMuted(true);
+        window.__onAppForeground = () => setAppMuted(false);
         function playTone(freq, type, duration, vol=0.1) {
+            if (appMuted) return;
             if (audioCtx.state === 'suspended') audioCtx.resume();
             const osc = audioCtx.createOscillator();
             const gain = audioCtx.createGain();
@@ -120,6 +133,12 @@
             <div class="mb-8 flex items-center justify-between bg-slate-100 border-2 border-slate-200 rounded-2xl px-5 py-4">
                 <span class="font-extrabold text-slate-600 uppercase tracking-wide">🎯 Motion controls</span>
                 <input id="motion-toggle" type="checkbox" onchange="setMotion(this.checked)" class="w-8 h-8 accent-blue-500">
+            </div>
+
+            <!-- Tilt direction swap -->
+            <div class="mb-8 flex items-center justify-between bg-slate-100 border-2 border-slate-200 rounded-2xl px-5 py-4">
+                <span class="font-extrabold text-slate-600 uppercase tracking-wide">🔀 Swap tilt direction<span id="swap-state" class="normal-case text-slate-400"></span></span>
+                <input id="swap-toggle" type="checkbox" onchange="setTiltSwapPref(this.checked)" class="w-8 h-8 accent-purple-500">
             </div>
 
             <!-- Tilt calibration -->
@@ -225,6 +244,7 @@
         </div>
 
         <button id="motion-pill" class="fixed top-24 right-4 z-40 bg-black/50 text-white font-extrabold uppercase text-sm px-4 py-2 rounded-full backdrop-blur-sm border-2 border-white/40">🎯 Motion: On</button>
+        <button id="quit-btn" onclick="quitToMenu()" class="fixed top-24 left-4 z-40 bg-black/50 text-white font-extrabold uppercase text-sm px-4 py-2 rounded-full backdrop-blur-sm border-2 border-white/40">✕ Quit</button>
 
         <!-- Touch Fallback Zones -->
         <div id="tap-zones" class="absolute inset-0 w-full h-full flex z-20">
@@ -272,8 +292,11 @@
                 </div>
             </div>
 
-            <button onclick="showScreen('menu-screen'); document.body.classList.remove('playing');" class="btn-3d btn-primary w-full py-5 rounded-xl text-2xl font-extrabold uppercase tracking-wide">
+            <button onclick="playAgain()" class="btn-3d btn-primary w-full py-5 rounded-xl text-2xl font-extrabold uppercase tracking-wide mb-3">
                 Play Again
+            </button>
+            <button onclick="showScreen('menu-screen'); document.body.classList.remove('playing');" class="btn-3d btn-category w-full py-4 rounded-xl text-xl font-extrabold uppercase tracking-wide">
+                Menu
             </button>
         </div>
     </div>
@@ -614,6 +637,7 @@
         };
 
         let currentDeck = [];
+        let lastGameSpec = null;
         let deckName = "";
         let currentCardIndex = 0;
         let score = 0;
@@ -640,6 +664,14 @@ let tiltState = 'neutral';      // 'neutral' | 'locked_pass' | 'locked_correct'
 let neutralSince = 0;
 let lastMotionTime = 0;
 let isProcessingTilt = false;
+// Output swap: when true, the fired action is flipped (pass <-> correct).
+// Remaur's device consistently reports the mapping reversed across detector
+// designs; the game's menu toggle and post-calibration verify step drive
+// this so the correction lives on his phone, not in another rebuild.
+let tiltSwap = false;
+function setTiltSwap(v) { tiltSwap = !!v; }
+function isTiltSwapped() { return tiltSwap; }
+
 // [INTEGRATION] motionOn is the user's persisted preference at load; the
 // subsystem flips it as sensors start/stop during play.
 let motionOn = true;
@@ -1214,7 +1246,7 @@ function evaluateTilt() {
       _tilt.pendingSince = 0;
       _tilt.lastTriggerTime = now;
       if (typeof handleTilt === 'function') {
-        handleTilt(candidate);
+        handleTilt(tiltSwap ? (candidate === 'correct' ? 'pass' : 'correct') : candidate);
       }
     }
     return;
@@ -1256,6 +1288,23 @@ function evaluateTilt() {
  *   - onComplete(profile)
  *   - onError(message)
  */
+// Live signed pitch/roll against the current baseline, for the game's
+// post-calibration verify step (shows the user what a nod registers as).
+// Returns null until a baseline frame + gravity sample exist.
+function getTiltReading() {
+  if (!tiltBase || !tiltBase.g || !tiltBase.p) return null;
+  const sample = _getCurrentGravity(performance.now());
+  if (!sample) return null;
+  const gCur = sample.g;
+  const c0 = _vecDot(gCur, tiltBase.g);
+  const cp = _vecDot(gCur, tiltBase.p);
+  const cr = _vecDot(gCur, tiltBase.r);
+  return {
+    thetaDeg: Math.atan2(cp, c0) * RAD2DEG,
+    rollDeg: Math.asin(_clamp(Math.abs(cr), 0, 1)) * RAD2DEG
+  };
+}
+
 function startTiltCalibration(callbacks) {
   const cb = callbacks || {};
   const now = performance.now();
@@ -1621,7 +1670,12 @@ function _finalizeCalibration(cal) {
             return ["Error Generating", "Check Connection", "Try Again", "Fallback Card 1", "Fallback Card 2"];
         }
 
+        function playAgain() {
+            if (lastGameSpec) prepareGame(lastGameSpec.type, lastGameSpec.topic);
+        }
+
         async function prepareGame(type, topic = "") {
+            lastGameSpec = { type: type, topic: topic };
             const topicInput = document.getElementById('custom-topic').value;
 
             showScreen('prep-screen');
@@ -1847,6 +1901,15 @@ function _finalizeCalibration(cal) {
             showScreen('results-screen');
         }
 
+        function quitToMenu() {
+            clearInterval(gameInterval);
+            stopRecording();
+            pauseSensors();
+            document.body.classList.remove('playing');
+            showScreen('menu-screen');
+            syncMotionUI();
+        }
+
 
 
         // --- MOTION TOGGLE + TILT CALIBRATION (gravity-sphere subsystem) ---
@@ -1886,12 +1949,11 @@ function _finalizeCalibration(cal) {
                     else if (step === 'up') calSetUI('⬆️', 'Now nod UP — your CORRECT motion — then come back to level.', 'Listening…');
                     document.getElementById('cal-btn').disabled = true;
                 },
-                onComplete: () => {
+                onComplete: (profile) => {
                     calDone = true;
                     clearTimeout(calWatchdog);
-                    if (!motionPref()) stopMotion();
                     syncMotionUI();
-                    calSetUI('✅', 'Calibration saved for this phone shape! Down nod = Pass, up nod = Correct. Tip: calibrate again in the other shape (folded vs unfolded) too.', 'Done');
+                    startCalVerify(profile);
                 },
                 onError: (msg) => {
                     calDone = false;
@@ -1908,13 +1970,81 @@ function _finalizeCalibration(cal) {
             b.textContent = btn; b.disabled = false;
         }
         function calAdvance() {
+            if (calVerify) {
+                const act = calVerify.action;
+                stopCalVerify();
+                calVerify = null;
+                if (act === 'flip') {
+                    setTiltSwapPref(!isTiltSwapped());
+                    startCalVerify(calVerifyProfile);
+                    return;
+                }
+                cancelCalibration();
+                return;
+            }
             if (calDone) { cancelCalibration(); return; }
             startCalibration();
         }
-        function cancelCalibration() { clearTimeout(calWatchdog); cancelTiltCalibration(); if (!motionPref()) stopMotion(); showScreen('menu-screen'); }
+        function cancelCalibration() { stopCalVerify(); calVerify = null; clearTimeout(calWatchdog); cancelTiltCalibration(); if (!motionPref()) stopMotion(); showScreen('menu-screen'); }
+
+        // --- Tilt swap + post-calibration verify ---
+        function tiltSwapPref() { try { return localStorage.getItem('hu_tilt_swap') !== '0'; } catch (e) { return true; } }
+        function setTiltSwapPref(v) {
+            try { localStorage.setItem('hu_tilt_swap', v ? '1' : '0'); } catch (e) {}
+            setTiltSwap(v);
+            syncSwapUI();
+        }
+        function syncSwapUI() {
+            const on = isTiltSwapped();
+            const st = document.getElementById('swap-state');
+            if (st) st.textContent = on ? ' (currently swapped)' : '';
+            const t = document.getElementById('swap-toggle');
+            if (t) t.checked = on;
+        }
+        let calVerify = null;
+        let calVerifyProfile = null;
+        function startCalVerify(profile) {
+            calVerifyProfile = profile;
+            calVerify = { stage: 'down', upTrig: profile.upTriggerDeg, downTrig: profile.downTriggerDeg, action: 'skip', timer: null };
+            if (!motionOn) startMotion();
+            resetTiltBaseline();
+            calSetUI('✅', 'Calibrated! Quick check: nod DOWN once. It should register as PASS.', 'Skip check');
+            calVerify.timer = setInterval(pollCalVerify, 120);
+        }
+        function stopCalVerify() {
+            if (calVerify && calVerify.timer) clearInterval(calVerify.timer);
+            if (calVerify) calVerify.timer = null;
+        }
+        function pollCalVerify() {
+            if (!calVerify) return;
+            const r = (typeof getTiltReading === 'function') ? getTiltReading() : null;
+            if (!r) return;
+            if (calVerify.stage === 'down' && r.thetaDeg <= -0.6 * calVerify.downTrig) {
+                const reg = isTiltSwapped() ? 'CORRECT' : 'PASS';
+                if (reg === 'PASS') {
+                    calVerify.stage = 'up';
+                    calSetUI('✅', 'That was PASS. Now nod UP once — it should register as CORRECT.', 'Skip check');
+                } else {
+                    calVerify.action = 'flip';
+                    calSetUI('⚠️', 'That registered as CORRECT — your down nod came through backwards. Tap below to flip the tilt direction, then we check again.', 'Flip my tilt direction');
+                }
+            } else if (calVerify.stage === 'up' && r.thetaDeg >= 0.6 * calVerify.upTrig) {
+                const reg = isTiltSwapped() ? 'PASS' : 'CORRECT';
+                stopCalVerify();
+                if (reg === 'CORRECT') {
+                    calVerify.action = 'skip';
+                    calSetUI('✅', 'All set! Down = PASS and up = CORRECT on this phone shape. You are good to go.', 'Done');
+                } else {
+                    calVerify.action = 'flip';
+                    calSetUI('⚠️', 'That registered as PASS — your up nod came through backwards. Tap below to flip the tilt direction, then we check again.', 'Flip my tilt direction');
+                }
+            }
+        }
 
         (function initMotion() {
+            setTiltSwap(tiltSwapPref());
             syncMotionUI();
+            syncSwapUI();
             const pill = document.getElementById('motion-pill');
             if (pill) {
                 pill.addEventListener('pointerdown', (e) => { e.preventDefault(); e.stopPropagation(); setMotion(!motionOn); });
@@ -1986,8 +2116,8 @@ function _finalizeCalibration(cal) {
 
         // Touch zones fire on PRESS (pointerdown), not click — no tap delay,
         // no missed taps. Same handleTilt path as the gyro.
-        document.getElementById('zone-pass').addEventListener('pointerdown', (e) => { e.preventDefault(); handleTilt('pass'); });
-        document.getElementById('zone-correct').addEventListener('pointerdown', (e) => { e.preventDefault(); handleTilt('correct'); });
+        document.getElementById('zone-pass').addEventListener('pointerdown', (e) => { e.preventDefault(); if (motionOn) return; handleTilt('pass'); });
+        document.getElementById('zone-correct').addEventListener('pointerdown', (e) => { e.preventDefault(); if (motionOn) return; handleTilt('correct'); });
     </script>
 </body>
 </html>
