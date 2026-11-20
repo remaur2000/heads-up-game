@@ -206,8 +206,8 @@
 
     <!-- COUNTDOWN -->
     <div id="countdown-screen" class="screen bg-slate-900 text-white">
-        <div id="countdown-number" class="text-[15rem] fredoka text-yellow-400 drop-shadow-[0_0_30px_rgba(250,204,21,0.6)]">3</div>
-        <p class="text-3xl mt-4 text-slate-300 uppercase tracking-widest font-extrabold">Place on forehead</p>
+        <div id="countdown-number" class="fredoka text-yellow-400 drop-shadow-[0_0_30px_rgba(250,204,21,0.6)]" style="font-size:clamp(6rem,42vmin,15rem);line-height:1;">3</div>
+        <p class="mt-4 text-slate-300 uppercase tracking-widest font-extrabold" style="font-size:clamp(1.1rem,5.5vmin,1.875rem);">Place on forehead</p>
     </div>
 
     <!-- ACTIVE GAME -->
@@ -620,14 +620,893 @@
         let timeLeft = 60;
         let gameInterval = null;
         let playedWords = []; // Store objects {word: '...', correct: true/false}
-        let isProcessingTilt = false;
-        let lastMotionTime = 0;
-        let tiltState = 'armed';
-        let neutralSince = 0;
-        let lastZ = null;
-        let lastGamma = null;
-        let lastBeta = null;
-        let tiltBase = null;
+// ============================================================================
+// Heads Up! Tilt Gesture Subsystem (3D Gravity-Sphere Detector + Calibration)
+// Written by Gemini 4 Neon (Thinking High), AI Army delegation 2026-11-20.
+// Design: work exclusively on the 3D unit gravity vector from low-pass
+// filtered devicemotion.accelerationIncludingGravity — no Euler angles in
+// the decision path, so no gamma saturation, no beta wrap, no gimbal lock.
+// Calibration records full nod trajectories per form factor (folded /
+// unfolded), extracts a single pitch axis + asymmetric degree thresholds.
+// Integration tweaks by Remmy are marked [INTEGRATION].
+// ============================================================================
+
+// --- Required Drop-In Globals ---
+let lastZ = null;
+let lastGamma = null;
+let lastBeta = null;
+let tiltBase = null;            // { g, p, r, formFactor, pendingUpright, z, gamma, beta }
+let tiltState = 'neutral';      // 'neutral' | 'locked_pass' | 'locked_correct'
+let neutralSince = 0;
+let lastMotionTime = 0;
+let isProcessingTilt = false;
+// [INTEGRATION] motionOn is the user's persisted preference at load; the
+// subsystem flips it as sensors start/stop during play.
+let motionOn = true;
+try { motionOn = localStorage.getItem('hu_motion') !== '0'; } catch (e) {}
+
+// --- Constants & Tuning ---
+const TILT_CAL_STORAGE_KEY = 'headsup_tilt_cal_v2';
+const TILT_CAL_VERSION = 2;
+const DEG2RAD = Math.PI / 180;
+const RAD2DEG = 180 / Math.PI;
+const GRAVITY_NORM = 9.81;
+
+const TILT_CFG = {
+  // Low-pass filter time constants (seconds) — rate-independent across 15–120 Hz WebViews
+  lpfTauCalm: 0.085,
+  lpfTauJerk: 0.18,
+  jerkThreshold: 2.5,           // | ||a|| - 9.81 | above this widens LPF to reject linear shakes
+  accelStaleMs: 350,            // fall back to orientation-derived 3D gravity if accel stops
+  oriFallbackGapMs: 120,        // prevent double-eval when both events fire simultaneously
+
+  // Default thresholds (degrees) when uncalibrated
+  defaultUpTriggerDeg: 25,
+  defaultDownTriggerDeg: 28,
+  minTriggerDeg: 18,
+  maxUpTriggerDeg: 42,
+  maxDownTriggerDeg: 45,
+  resetRatio: 0.42,             // hysteresis return band = 42% of trigger angle
+  minResetDeg: 8,
+  maxResetDeg: 16,
+
+  // Timing & velocity gates
+  triggerHoldMs: 45,            // normal dwell past trigger angle
+  fastTriggerHoldMs: 22,        // snappy dwell when angular speed confirms deliberate nod
+  fastNodVelDegPerSec: 38,
+  neutralHoldMs: 210,           // must stay level this long to re-arm
+  rearmMaxVelDegPerSec: 85,     // blocks rebound overshoot from re-arming mid-whip
+  refractoryMs: 350,            // minimum gap between consecutive triggers
+  offAxisRollDeg: 38,           // reject sideways ear-to-shoulder tilt
+
+  // Gentle baseline drift compensation while genuinely still in neutral
+  driftMaxAngleDeg: 9,
+  driftMaxVelDegPerSec: 10,
+  driftTauSec: 8.0,
+
+  // Calibration trajectory capture
+  calRestSettleDelayMs: 450,
+  calRestHoldMs: 650,
+  calRestMaxVelDegPerSec: 16,
+  calMinNodDeg: 18,
+  calTimeoutFallbackDeg: 15,
+  calReturnHoldMs: 280,
+  calStepTimeoutMs: 6500,
+  calOppositeDotMax: -0.25,     // up and down tangents must oppose each other
+  calTriggerScale: 0.58
+};
+
+// --- Internal Subsystem State ---
+const _tilt = {
+  listenersAttached: false,
+  gAccelRaw: null,              // low-pass filtered 3D accel vector (unnormalized)
+  gAccelUnit: null,             // normalized 3D gravity from devicemotion
+  lastAccelTime: 0,
+  gOriUnit: null,               // normalized 3D gravity from deviceorientation
+  lastOriTime: 0,
+
+  // Evaluation kinematics
+  lastEvalTime: 0,
+  lastTheta: 0,
+  pitchVel: 0,
+  pendingDir: null,             // 'pass' | 'correct' | null
+  pendingSince: 0,
+  lastTriggerTime: 0,
+  uprightSince: 0,
+
+  // Active calibration profile cache
+  activeFormFactor: null,
+  activeProfile: null,
+
+  // Hands-free calibration state machine
+  cal: null
+};
+
+// ============================================================================
+// 3D Vector Math (Singularity-Free on S^2)
+// ============================================================================
+
+function _clamp(v, lo, hi) {
+  return v < lo ? lo : (v > hi ? hi : v);
+}
+
+function _vecDot(a, b) {
+  return a.x * b.x + a.y * b.y + a.z * b.z;
+}
+
+function _vecCross(a, b) {
+  return {
+    x: a.y * b.z - a.z * b.y,
+    y: a.z * b.x - a.x * b.z,
+    z: a.x * b.y - a.y * b.x
+  };
+}
+
+function _vecLen(a) {
+  return Math.hypot(a.x, a.y, a.z);
+}
+
+function _vecNormalize(a) {
+  const l = Math.hypot(a.x, a.y, a.z);
+  if (!Number.isFinite(l) || l < 1e-6) return null;
+  return { x: a.x / l, y: a.y / l, z: a.z / l };
+}
+
+function _vecSub(a, b) {
+  return { x: a.x - b.x, y: a.y - b.y, z: a.z - b.z };
+}
+
+function _vecScale(a, s) {
+  return { x: a.x * s, y: a.y * s, z: a.z * s };
+}
+
+function _vecAngleDeg(a, b) {
+  return Math.acos(_clamp(_vecDot(a, b), -1, 1)) * RAD2DEG;
+}
+
+/**
+ * Exact Earth-Up unit vector in device coordinates from W3C (beta, gamma).
+ * Continuous across BOTH beta = +-180 wrap and gamma = +-90 flip.
+ */
+function _gravityFromOrientation(betaDeg, gammaDeg) {
+  if (!Number.isFinite(betaDeg) || !Number.isFinite(gammaDeg)) return null;
+  const b = betaDeg * DEG2RAD;
+  const g = gammaDeg * DEG2RAD;
+  const cb = Math.cos(b);
+  return _vecNormalize({
+    x: -Math.sin(g) * cb,
+    y: Math.sin(b),
+    z: Math.cos(g) * cb
+  });
+}
+
+// ============================================================================
+// Form Factor Detection & LocalStorage Persistence (Folded vs Unfolded)
+// ============================================================================
+
+function getFormFactorKey() {
+  const w = (window.screen && window.screen.width) || window.innerWidth || 1;
+  const h = (window.screen && window.screen.height) || window.innerHeight || 1;
+  const ratio = Math.min(w, h) / Math.max(w, h);
+  // Galaxy Z Fold6 cover screen ratio ~0.39; unfolded inner screen ratio ~0.80
+  return ratio >= 0.62 ? 'unfolded' : 'folded';
+}
+
+function _defaultProfile(formFactor) {
+  const upTriggerDeg = TILT_CFG.defaultUpTriggerDeg;
+  const downTriggerDeg = TILT_CFG.defaultDownTriggerDeg;
+  return {
+    version: TILT_CAL_VERSION,
+    formFactor,
+    calibrated: false,
+    // [INTEGRATION] Default pitch axis sign verified against Remaur's Fold6
+    // sensor data: his down-nod (gamma collapsing from +73 deg) rotates the
+    // gravity vector toward +Z in device coords, so the pitch-up axis is -Z.
+    // (Calibration overrides this from the user's own nods, per form factor.)
+    pCal: { x: 0, y: 0, z: -1 },
+    upTriggerDeg,
+    downTriggerDeg,
+    upResetDeg: _clamp(upTriggerDeg * TILT_CFG.resetRatio, TILT_CFG.minResetDeg, TILT_CFG.maxResetDeg),
+    downResetDeg: _clamp(downTriggerDeg * TILT_CFG.resetRatio, TILT_CFG.minResetDeg, TILT_CFG.maxResetDeg),
+    upPeakDeg: upTriggerDeg / TILT_CFG.calTriggerScale,
+    downPeakDeg: downTriggerDeg / TILT_CFG.calTriggerScale,
+    updatedAt: 0
+  };
+}
+
+function _readAllCalibrations() {
+  try {
+    const raw = localStorage.getItem(TILT_CAL_STORAGE_KEY);
+    if (!raw) return {};
+    const parsed = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object') return {};
+    return parsed;
+  } catch (_) {
+    return {};
+  }
+}
+
+function _writeAllCalibrations(map) {
+  try {
+    localStorage.setItem(TILT_CAL_STORAGE_KEY, JSON.stringify(map));
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function _isValidProfile(p) {
+  return !!(
+    p &&
+    p.version === TILT_CAL_VERSION &&
+    p.pCal &&
+    Number.isFinite(p.pCal.x) &&
+    Number.isFinite(p.pCal.y) &&
+    Number.isFinite(p.pCal.z) &&
+    _vecLen(p.pCal) > 0.9 &&
+    Number.isFinite(p.upTriggerDeg) &&
+    Number.isFinite(p.downTriggerDeg)
+  );
+}
+
+function getTiltCalibration(formFactor) {
+  const ff = formFactor || getFormFactorKey();
+  const map = _readAllCalibrations();
+  const stored = map[ff];
+  if (_isValidProfile(stored)) return stored;
+  return _defaultProfile(ff);
+}
+
+function isTiltCalibrated(formFactor) {
+  return !!getTiltCalibration(formFactor).calibrated;
+}
+
+function _saveTiltCalibration(profile) {
+  const map = _readAllCalibrations();
+  map[profile.formFactor] = profile;
+  _writeAllCalibrations(map);
+  _tilt.activeFormFactor = profile.formFactor;
+  _tilt.activeProfile = profile;
+}
+
+function clearTiltCalibration(formFactor) {
+  const map = _readAllCalibrations();
+  if (formFactor) {
+    delete map[formFactor];
+  } else {
+    delete map.folded;
+    delete map.unfolded;
+  }
+  _writeAllCalibrations(map);
+  _refreshActiveProfile();
+}
+
+function _refreshActiveProfile() {
+  const ff = getFormFactorKey();
+  if (_tilt.activeFormFactor !== ff || !_tilt.activeProfile) {
+    _tilt.activeFormFactor = ff;
+    _tilt.activeProfile = getTiltCalibration(ff);
+    return true; // form factor changed
+  }
+  return false;
+}
+
+// ============================================================================
+// Active Gravity Source Selection & Baseline Frame Construction
+// ============================================================================
+
+function _getCurrentGravity(now) {
+  // Primary: atomic 3D accelerationIncludingGravity (immune to gamma saturation & beta wrap)
+  if (_tilt.gAccelUnit && (now - _tilt.lastAccelTime) <= TILT_CFG.accelStaleMs) {
+    return { g: _tilt.gAccelUnit, source: 'accel' };
+  }
+  // Fallback 1: orientation-derived 3D unit vector
+  if (_tilt.gOriUnit && (now - _tilt.lastOriTime) <= 1000) {
+    return { g: _tilt.gOriUnit, source: 'ori' };
+  }
+  // Fallback 2: external caller populated legacy globals directly
+  if (Number.isFinite(lastBeta) && Number.isFinite(lastGamma)) {
+    const g = _gravityFromOrientation(lastBeta, lastGamma);
+    if (g) return { g, source: 'legacy_ori' };
+  }
+  if (Number.isFinite(lastZ)) {
+    const gz = _clamp(lastZ / GRAVITY_NORM, -1, 1);
+    const gx = -Math.sqrt(Math.max(0, 1 - gz * gz));
+    return { g: { x: gx, y: 0, z: gz }, source: 'legacy_z' };
+  }
+  return null;
+}
+
+/**
+ * Builds orthonormal frame (g0, p0, r0) at live baseline g0.
+ * Gram-Schmidt orthogonalizing pCal against g0 automatically survives:
+ *   - different starting forehead lean angles
+ *   - rotating phone 180 deg in landscape (left vs right side up)
+ *   - portrait vs landscape orientation
+ */
+function _buildTiltFrame(g0, pCal) {
+  const dot = _vecDot(pCal, g0);
+  const proj = _vecSub(pCal, _vecScale(g0, dot));
+  const projLen = _vecLen(proj);
+
+  // If phone is nearly flat (screen pointing straight up/down), frame is degenerate
+  if (projLen < 0.35) {
+    return { g: g0, p: null, r: null, pendingUpright: true };
+  }
+
+  const p0 = _vecScale(proj, 1 / projLen);
+  const r0 = _vecNormalize(_vecCross(g0, p0)) || { x: 0, y: 1, z: 0 };
+  return { g: g0, p: p0, r: r0, pendingUpright: false };
+}
+
+function resetTiltBaseline() {
+  const now = performance.now();
+  _refreshActiveProfile();
+  const sample = _getCurrentGravity(now);
+
+  tiltState = 'neutral';
+  neutralSince = 0;
+  _tilt.pendingDir = null;
+  _tilt.pendingSince = 0;
+  _tilt.lastTheta = 0;
+  _tilt.pitchVel = 0;
+  _tilt.uprightSince = 0;
+
+  if (!sample) {
+    tiltBase = null;
+    return false;
+  }
+
+  const frame = _buildTiltFrame(sample.g, _tilt.activeProfile.pCal);
+  tiltBase = {
+    g: frame.g,
+    p: frame.p,
+    r: frame.r,
+    pendingUpright: frame.pendingUpright,
+    formFactor: _tilt.activeFormFactor,
+    z: lastZ,
+    gamma: lastGamma,
+    beta: lastBeta
+  };
+  return !frame.pendingUpright;
+}
+
+// ============================================================================
+// Core Sensor Listeners
+// ============================================================================
+
+function _onDeviceMotion(e) {
+  const now = performance.now();
+  const a = e.accelerationIncludingGravity;
+  if (!a || !Number.isFinite(a.x) || !Number.isFinite(a.y) || !Number.isFinite(a.z)) {
+    return;
+  }
+
+  const mag = Math.hypot(a.x, a.y, a.z);
+  if (!Number.isFinite(mag) || mag < 2.0 || mag > 35.0) return;
+
+  lastZ = a.z;
+  lastMotionTime = now;
+
+  if (!_tilt.gAccelRaw || !_tilt.lastAccelTime) {
+    _tilt.gAccelRaw = { x: a.x, y: a.y, z: a.z };
+  } else {
+    const dt = _clamp((now - _tilt.lastAccelTime) / 1000, 0.004, 0.2);
+    const isJerking = Math.abs(mag - GRAVITY_NORM) > TILT_CFG.jerkThreshold;
+    const tau = isJerking ? TILT_CFG.lpfTauJerk : TILT_CFG.lpfTauCalm;
+    const alpha = 1 - Math.exp(-dt / tau);
+    _tilt.gAccelRaw.x += alpha * (a.x - _tilt.gAccelRaw.x);
+    _tilt.gAccelRaw.y += alpha * (a.y - _tilt.gAccelRaw.y);
+    _tilt.gAccelRaw.z += alpha * (a.z - _tilt.gAccelRaw.z);
+  }
+
+  const unit = _vecNormalize(_tilt.gAccelRaw);
+  if (unit) {
+    _tilt.gAccelUnit = unit;
+    _tilt.lastAccelTime = now;
+  }
+
+  if (_tilt.cal) {
+    _stepCalibration(now);
+  } else if (motionOn) {
+    evaluateTilt();
+  }
+}
+
+function _onDeviceOrientation(e) {
+  const now = performance.now();
+  if (Number.isFinite(e.gamma)) lastGamma = e.gamma;
+  if (Number.isFinite(e.beta)) lastBeta = e.beta;
+
+  const unit = _gravityFromOrientation(lastBeta, lastGamma);
+  if (unit) {
+    _tilt.gOriUnit = unit;
+    _tilt.lastOriTime = now;
+  }
+
+  // Only drive evaluation from orientation when devicemotion is absent/stale
+  if ((now - _tilt.lastAccelTime) > TILT_CFG.oriFallbackGapMs) {
+    lastMotionTime = now;
+    if (_tilt.cal) {
+      _stepCalibration(now);
+    } else if (motionOn) {
+      evaluateTilt();
+    }
+  }
+}
+
+function _onViewportOrOrientationChange() {
+  const changed = _refreshActiveProfile();
+  if (changed && tiltBase) {
+    // Re-capture baseline for the newly active folded/unfolded form factor
+    resetTiltBaseline();
+  }
+}
+
+async function startMotion() {
+  // iOS 13+ permission gate (no-op on Android Chrome / WebView)
+  try {
+    if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+      const res = await DeviceMotionEvent.requestPermission();
+      if (res !== 'granted') return false;
+    }
+    if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
+      await DeviceOrientationEvent.requestPermission().catch(() => {});
+    }
+  } catch (_) {
+    return false;
+  }
+
+  if (!_tilt.listenersAttached) {
+    window.addEventListener('devicemotion', _onDeviceMotion, { passive: true });
+    window.addEventListener('deviceorientation', _onDeviceOrientation, { passive: true });
+    window.addEventListener('resize', _onViewportOrOrientationChange, { passive: true });
+    if (screen.orientation && screen.orientation.addEventListener) {
+      screen.orientation.addEventListener('change', _onViewportOrOrientationChange);
+    }
+    _tilt.listenersAttached = true;
+  }
+
+  _refreshActiveProfile();
+  motionOn = true;
+  resetTiltBaseline();
+  return true;
+}
+
+function stopMotion() {
+  motionOn = false;
+  cancelTiltCalibration();
+  if (_tilt.listenersAttached) {
+    window.removeEventListener('devicemotion', _onDeviceMotion);
+    window.removeEventListener('deviceorientation', _onDeviceOrientation);
+    window.removeEventListener('resize', _onViewportOrOrientationChange);
+    if (screen.orientation && screen.orientation.removeEventListener) {
+      screen.orientation.removeEventListener('change', _onViewportOrOrientationChange);
+    }
+    _tilt.listenersAttached = false;
+  }
+}
+
+// ============================================================================
+// Main Detector: evaluateTilt()
+// ============================================================================
+
+function evaluateTilt() {
+  if (!motionOn || _tilt.cal) return;
+
+  const now = performance.now();
+  const ffChanged = _refreshActiveProfile();
+  const profile = _tilt.activeProfile;
+  const sample = _getCurrentGravity(now);
+  if (!sample) return;
+  const gCur = sample.g;
+
+  // Hydrate or upgrade tiltBase (handles both null and legacy {z,gamma,beta} assignments)
+  if (!tiltBase || !tiltBase.g || ffChanged || tiltBase.formFactor !== _tilt.activeFormFactor) {
+    resetTiltBaseline();
+    if (!tiltBase || !tiltBase.g) return;
+  }
+
+  // If round started while phone was held flat, wait until raised upright onto forehead
+  if (tiltBase.pendingUpright || !tiltBase.p) {
+    const uprightDot = Math.abs(_vecDot(gCur, profile.pCal));
+    if (uprightDot < 0.65) {
+      if (!_tilt.uprightSince) _tilt.uprightSince = now;
+      if ((now - _tilt.uprightSince) >= 220) {
+        const frame = _buildTiltFrame(gCur, profile.pCal);
+        if (!frame.pendingUpright) {
+          tiltBase.g = frame.g;
+          tiltBase.p = frame.p;
+          tiltBase.r = frame.r;
+          tiltBase.pendingUpright = false;
+          tiltBase.z = lastZ;
+          tiltBase.gamma = lastGamma;
+          tiltBase.beta = lastBeta;
+          _tilt.lastTheta = 0;
+          _tilt.pitchVel = 0;
+          _tilt.lastEvalTime = now;
+        }
+      }
+    } else {
+      _tilt.uprightSince = 0;
+    }
+    return;
+  }
+
+  // Project live unit gravity into baseline orthonormal frame (g0, p0, r0)
+  const c0 = _vecDot(gCur, tiltBase.g);
+  const cp = _vecDot(gCur, tiltBase.p);
+  const cr = _vecDot(gCur, tiltBase.r);
+
+  // Signed forehead pitch in degrees: > 0 = UP-nod (correct), < 0 = DOWN-nod (pass)
+  const theta = Math.atan2(cp, c0) * RAD2DEG;
+  const rollDeg = Math.asin(_clamp(Math.abs(cr), 0, 1)) * RAD2DEG;
+
+  // Rate-independent smoothed angular velocity (deg/s)
+  const dt = _tilt.lastEvalTime
+    ? _clamp((now - _tilt.lastEvalTime) / 1000, 0.004, 0.2)
+    : 0.016;
+  const instVel = (theta - _tilt.lastTheta) / dt;
+  const velAlpha = 1 - Math.exp(-dt / 0.045);
+  _tilt.pitchVel += velAlpha * (instVel - _tilt.pitchVel);
+  _tilt.lastTheta = theta;
+  _tilt.lastEvalTime = now;
+
+  // --- State Machine ---
+
+  // 1) Locked state: strictly one registration per nod; re-arm only after settling level
+  if (tiltState !== 'neutral') {
+    const inNeutralBand = theta >= -profile.downResetDeg && theta <= profile.upResetDeg;
+    const isCalm = Math.abs(_tilt.pitchVel) <= TILT_CFG.rearmMaxVelDegPerSec;
+
+    if (inNeutralBand && isCalm) {
+      if (!neutralSince) neutralSince = now;
+      const heldNeutral = (now - neutralSince) >= TILT_CFG.neutralHoldMs;
+      const cooledDown = (now - _tilt.lastTriggerTime) >= TILT_CFG.refractoryMs;
+      if (heldNeutral && cooledDown) {
+        tiltState = 'neutral';
+        neutralSince = 0;
+        _tilt.pendingDir = null;
+        _tilt.pendingSince = 0;
+      }
+    } else {
+      neutralSince = 0;
+    }
+    return;
+  }
+
+  // 2) Armed ('neutral') state: respect host game's card-transition lock
+  if (isProcessingTilt) {
+    _tilt.pendingDir = null;
+    _tilt.pendingSince = 0;
+    return;
+  }
+
+  // Reject pure sideways head roll (ear toward shoulder)
+  const isSidewaysRoll = rollDeg > TILT_CFG.offAxisRollDeg && rollDeg > Math.abs(theta);
+  if (isSidewaysRoll) {
+    _tilt.pendingDir = null;
+    _tilt.pendingSince = 0;
+    return;
+  }
+
+  let candidate = null;
+  let velocityMatches = false;
+
+  if (theta >= profile.upTriggerDeg) {
+    candidate = 'correct';
+    velocityMatches = _tilt.pitchVel >= TILT_CFG.fastNodVelDegPerSec;
+  } else if (theta <= -profile.downTriggerDeg) {
+    candidate = 'pass';
+    velocityMatches = _tilt.pitchVel <= -TILT_CFG.fastNodVelDegPerSec;
+  }
+
+  if (candidate) {
+    if (_tilt.pendingDir !== candidate) {
+      _tilt.pendingDir = candidate;
+      _tilt.pendingSince = now;
+    }
+    const neededHold = velocityMatches ? TILT_CFG.fastTriggerHoldMs : TILT_CFG.triggerHoldMs;
+    if ((now - _tilt.pendingSince) >= neededHold) {
+      tiltState = candidate === 'correct' ? 'locked_correct' : 'locked_pass';
+      neutralSince = 0;
+      _tilt.pendingDir = null;
+      _tilt.pendingSince = 0;
+      _tilt.lastTriggerTime = now;
+      if (typeof handleTilt === 'function') {
+        handleTilt(candidate);
+      }
+    }
+    return;
+  }
+
+  _tilt.pendingDir = null;
+  _tilt.pendingSince = 0;
+
+  // 3) Slow posture-drift adaptation when genuinely holding still near level
+  const driftBand = Math.min(TILT_CFG.driftMaxAngleDeg, profile.upResetDeg, profile.downResetDeg);
+  if (Math.abs(theta) < driftBand && Math.abs(_tilt.pitchVel) < TILT_CFG.driftMaxVelDegPerSec) {
+    const a = 1 - Math.exp(-dt / TILT_CFG.driftTauSec);
+    const blended = _vecNormalize({
+      x: tiltBase.g.x + a * (gCur.x - tiltBase.g.x),
+      y: tiltBase.g.y + a * (gCur.y - tiltBase.g.y),
+      z: tiltBase.g.z + a * (gCur.z - tiltBase.g.z)
+    });
+    if (blended) {
+      const frame = _buildTiltFrame(blended, profile.pCal);
+      if (!frame.pendingUpright) {
+        tiltBase.g = frame.g;
+        tiltBase.p = frame.p;
+        tiltBase.r = frame.r;
+      }
+    }
+  }
+}
+
+// ============================================================================
+// Hands-Free 3-Step Trajectory Calibration Capture
+// Steps: 'rest' (hold on forehead) -> 'down' (nod pass) -> 'up' (nod correct)
+// ============================================================================
+
+/**
+ * Starts guided hands-free calibration for the current form factor (folded/unfolded).
+ * @param {Object} callbacks
+ *   - onStep(step, promptText)      step: 'rest' | 'down' | 'up'
+ *   - onProgress({ step, angleDeg, peakDeg, ratio })
+ *   - onComplete(profile)
+ *   - onError(message)
+ */
+function startTiltCalibration(callbacks) {
+  const cb = callbacks || {};
+  const now = performance.now();
+
+  if (!_tilt.listenersAttached) {
+    startMotion();
+  }
+
+  _tilt.cal = {
+    step: 'rest',
+    stepStartedAt: now,
+    formFactor: getFormFactorKey(),
+    cb,
+    lastG: null,
+    lastT: 0,
+    // 'rest' accumulators
+    steadySince: 0,
+    restSum: { x: 0, y: 0, z: 0 },
+    restCount: 0,
+    gRest: null,
+    // 'down' / 'up' trajectory accumulators
+    peakAngle: 0,
+    peakG: null,
+    returnSince: 0,
+    gDown: null,
+    downTan: null,
+    gUp: null
+  };
+
+  if (typeof cb.onStep === 'function') {
+    cb.onStep('rest', 'Hold the phone level on your forehead');
+  }
+}
+
+function cancelTiltCalibration() {
+  _tilt.cal = null;
+}
+
+function _failCalibration(msg) {
+  const cal = _tilt.cal;
+  _tilt.cal = null;
+  if (cal && cal.cb && typeof cal.cb.onError === 'function') {
+    cal.cb.onError(msg);
+  }
+}
+
+function _stepCalibration(now) {
+  const cal = _tilt.cal;
+  if (!cal) return;
+
+  const sample = _getCurrentGravity(now);
+  if (!sample) return;
+  const g = sample.g;
+
+  const dt = cal.lastT ? _clamp((now - cal.lastT) / 1000, 0.004, 0.2) : 0.016;
+  const angSpeed = cal.lastG ? (_vecAngleDeg(g, cal.lastG) / dt) : 0;
+  cal.lastG = g;
+  cal.lastT = now;
+
+  const elapsed = now - cal.stepStartedAt;
+
+  // --- Step 1: Capture steady forehead rest pose ---
+  if (cal.step === 'rest') {
+    if (elapsed < TILT_CFG.calRestSettleDelayMs) return;
+
+    if (angSpeed <= TILT_CFG.calRestMaxVelDegPerSec) {
+      if (!cal.steadySince) {
+        cal.steadySince = now;
+        cal.restSum = { x: 0, y: 0, z: 0 };
+        cal.restCount = 0;
+      }
+      cal.restSum.x += g.x;
+      cal.restSum.y += g.y;
+      cal.restSum.z += g.z;
+      cal.restCount += 1;
+
+      const held = now - cal.steadySince;
+      if (typeof cal.cb.onProgress === 'function') {
+        cal.cb.onProgress({
+          step: 'rest',
+          angleDeg: 0,
+          peakDeg: 0,
+          ratio: _clamp(held / TILT_CFG.calRestHoldMs, 0, 1)
+        });
+      }
+
+      if (held >= TILT_CFG.calRestHoldMs && cal.restCount >= 4) {
+        cal.gRest = _vecNormalize(cal.restSum);
+        if (!cal.gRest) {
+          _failCalibration('Sensor reading invalid during rest capture.');
+          return;
+        }
+        cal.step = 'down';
+        cal.stepStartedAt = now;
+        cal.peakAngle = 0;
+        cal.peakG = null;
+        cal.returnSince = 0;
+        if (typeof cal.cb.onStep === 'function') {
+          cal.cb.onStep('down', 'Nod DOWN (Pass), then return to level');
+        }
+      }
+    } else {
+      cal.steadySince = 0;
+      if (elapsed > TILT_CFG.calStepTimeoutMs) {
+        _failCalibration('Hold the phone still on your forehead to calibrate.');
+      }
+    }
+    return;
+  }
+
+  // --- Steps 2 & 3: Capture full trajectory peak + return for 'down' and 'up' ---
+  if (cal.step === 'down' || cal.step === 'up') {
+    const angle = _vecAngleDeg(g, cal.gRest);
+
+    // During 'up', only track samples moving opposite to the recorded 'down' tangent
+    let validDirection = true;
+    if (cal.step === 'up' && cal.downTan && angle > 6) {
+      const tan = _vecNormalize(_vecSub(g, _vecScale(cal.gRest, _vecDot(g, cal.gRest))));
+      if (!tan || _vecDot(tan, cal.downTan) > TILT_CFG.calOppositeDotMax) {
+        validDirection = false;
+      }
+    }
+
+    if (validDirection && angle > cal.peakAngle) {
+      cal.peakAngle = angle;
+      cal.peakG = g;
+    }
+
+    if (typeof cal.cb.onProgress === 'function') {
+      cal.cb.onProgress({
+        step: cal.step,
+        angleDeg: angle,
+        peakDeg: cal.peakAngle,
+        ratio: _clamp(cal.peakAngle / 35, 0, 1)
+      });
+    }
+
+    const reachedNod = cal.peakAngle >= TILT_CFG.calMinNodDeg;
+    const returnBand = Math.max(12, cal.peakAngle * 0.45);
+    const backNearLevel = angle <= returnBand && angSpeed <= TILT_CFG.rearmMaxVelDegPerSec;
+
+    if (reachedNod && backNearLevel) {
+      if (!cal.returnSince) cal.returnSince = now;
+    } else {
+      cal.returnSince = 0;
+    }
+
+    const completedNormally = cal.returnSince && (now - cal.returnSince) >= TILT_CFG.calReturnHoldMs;
+    const timedOutWithData = elapsed >= TILT_CFG.calStepTimeoutMs && cal.peakAngle >= TILT_CFG.calTimeoutFallbackDeg;
+
+    if (completedNormally || timedOutWithData) {
+      if (cal.step === 'down') {
+        cal.gDown = cal.peakG;
+        cal.downTan = _vecNormalize(
+          _vecSub(cal.gDown, _vecScale(cal.gRest, _vecDot(cal.gDown, cal.gRest)))
+        );
+        if (!cal.downTan) {
+          _failCalibration('Down-nod too small to measure.');
+          return;
+        }
+        cal.step = 'up';
+        cal.stepStartedAt = now;
+        cal.peakAngle = 0;
+        cal.peakG = null;
+        cal.returnSince = 0;
+        if (typeof cal.cb.onStep === 'function') {
+          cal.cb.onStep('up', 'Now nod UP (Correct), then return to level');
+        }
+      } else {
+        cal.gUp = cal.peakG;
+        _finalizeCalibration(cal);
+      }
+      return;
+    }
+
+    if (elapsed >= TILT_CFG.calStepTimeoutMs) {
+      _failCalibration(
+        cal.step === 'down'
+          ? 'Could not detect a clear down-nod. Try nodding further.'
+          : 'Could not detect a clear up-nod opposite to down-nod.'
+      );
+    }
+  }
+}
+
+function _finalizeCalibration(cal) {
+  const upTan = _vecNormalize(
+    _vecSub(cal.gUp, _vecScale(cal.gRest, _vecDot(cal.gUp, cal.gRest)))
+  );
+  if (!upTan || !cal.downTan) {
+    _failCalibration('Calibration vectors collapsed; please retry.');
+    return;
+  }
+
+  const opposition = _vecDot(upTan, cal.downTan);
+  if (opposition > TILT_CFG.calOppositeDotMax) {
+    _failCalibration('Down-nod and up-nod were not in opposite directions.');
+    return;
+  }
+
+  // Combine both tangents into a single clean pitch-up unit vector (up = +, down = -)
+  const pCal = _vecNormalize(_vecSub(upTan, cal.downTan));
+  if (!pCal) {
+    _failCalibration('Could not compute pitch axis; please retry.');
+    return;
+  }
+
+  // True projected peak angles along pCal
+  const upPeakDeg = Math.atan2(_vecDot(cal.gUp, pCal), _vecDot(cal.gUp, cal.gRest)) * RAD2DEG;
+  const downPeakDeg = -Math.atan2(_vecDot(cal.gDown, pCal), _vecDot(cal.gDown, cal.gRest)) * RAD2DEG;
+
+  if (upPeakDeg < 12 || downPeakDeg < 12) {
+    _failCalibration('Nod range too small; try clearer nods.');
+    return;
+  }
+
+  const upTriggerDeg = _clamp(
+    upPeakDeg * TILT_CFG.calTriggerScale,
+    TILT_CFG.minTriggerDeg,
+    TILT_CFG.maxUpTriggerDeg
+  );
+  const downTriggerDeg = _clamp(
+    downPeakDeg * TILT_CFG.calTriggerScale,
+    TILT_CFG.minTriggerDeg,
+    TILT_CFG.maxDownTriggerDeg
+  );
+
+  const profile = {
+    version: TILT_CAL_VERSION,
+    formFactor: cal.formFactor,
+    calibrated: true,
+    pCal,
+    upTriggerDeg,
+    downTriggerDeg,
+    upResetDeg: _clamp(upTriggerDeg * TILT_CFG.resetRatio, TILT_CFG.minResetDeg, TILT_CFG.maxResetDeg),
+    downResetDeg: _clamp(downTriggerDeg * TILT_CFG.resetRatio, TILT_CFG.minResetDeg, TILT_CFG.maxResetDeg),
+    upPeakDeg,
+    downPeakDeg,
+    updatedAt: Date.now()
+  };
+
+  _saveTiltCalibration(profile);
+  const cb = cal.cb;
+  _tilt.cal = null;
+  resetTiltBaseline();
+
+  if (cb && typeof cb.onComplete === 'function') {
+    cb.onComplete(profile);
+  }
+}
+
         let fullDeck = [];
 
         // Fisher-Yates shuffle (replaces the old random-sort)
@@ -781,15 +1660,7 @@
 
         // --- MOTION SENSOR LOGIC ---
         async function requestSensorsAndStart() {
-            if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
-                try { await DeviceMotionEvent.requestPermission(); } catch (e) { console.error("Motion denied", e); }
-            }
-            if (typeof DeviceOrientationEvent !== 'undefined' && typeof DeviceOrientationEvent.requestPermission === 'function') {
-                try { await DeviceOrientationEvent.requestPermission(); } catch (e) { console.error("Orientation denied", e); }
-            }
-
-            window.addEventListener('devicemotion', handleMotion);
-            window.addEventListener('deviceorientation', handleOrientation);
+            if (motionOn) { await startMotion(); }
 
             document.body.classList.add('playing');
 
@@ -847,9 +1718,8 @@
         }
 
         function beginTimer() {
-            // Calibrate tilt to the player's forehead pose right now.
-            tiltBase = { z: (lastZ === null ? 0 : lastZ), g: lastGamma, b: lastBeta };
-            tiltState = 'armed'; neutralSince = 0;
+            // Baseline the gravity-sphere detector to the forehead pose now.
+            resetTiltBaseline();
             showScreen('game-screen');
             const vb = document.getElementById('video-block'); if (vb) vb.classList.add('hidden');
             startRecording();
@@ -884,84 +1754,8 @@
             setTimeout(() => { isProcessingTilt = false; }, 150);
         }
 
-        // --- TILT DETECTOR (dual channel, calibrated to the player) ---
-        // Z-only detection failed on Remaur's phone: his nods are shallow in z
-        // (up-nod peaked +4.1, under the old 5.0 trigger) but huge in gamma
-        // (down-nod swung gamma -81 deg in landscape). So: baseline = forehead
-        // pose when the round starts. CORRECT = gamma plunge with z falling,
-        // or a strong negative z alone. PASS = z rising well above baseline.
-        // Neutral latch: no re-fire until the pose returns near baseline.
-        function handleMotion(event) {
-            const z = event.accelerationIncludingGravity?.z;
-            if (z === null || z === undefined) return;
-            lastZ = z;
-            if (document.getElementById('game-screen').classList.contains('active')) evaluateTilt();
-        }
-
-        function handleOrientation(event) {
-            if (event.gamma === null || event.gamma === undefined) return;
-            lastGamma = event.gamma;
-            lastBeta = event.beta;
-            if (document.getElementById('game-screen').classList.contains('active')) evaluateTilt();
-        }
-
-        function evaluateTilt() {
-            if (!tiltBase || !motionOn) return;
-            const dz = (lastZ === null) ? 0 : lastZ - tiltBase.z;
-            const dgRaw = (lastGamma === null || tiltBase.g === null) ? 0 : lastGamma - tiltBase.g;
-            const dbRaw = (lastBeta === null || tiltBase.b === null || tiltBase.b === undefined) ? 0 : lastBeta - tiltBase.b;
-            const now = Date.now();
-
-            if (tiltCal && tiltCal.down && tiltCal.up) {
-                // CALIBRATED mode: project the live delta onto the two nod
-                // directions Remaur recorded. Channel-agnostic, so folded
-                // and unfolded behave the same. Down nod = PASS, up = CORRECT.
-                const dLen = Math.hypot(dz, dgRaw, dbRaw);
-                const minExc = Math.min(tiltCal.down.len, tiltCal.up.len);
-                if (tiltState === 'locked') {
-                    if (dLen <= Math.max(2.5, minExc * 0.22)) {
-                        if (!neutralSince) neutralSince = now;
-                        if (now - neutralSince >= 250) { tiltState = 'armed'; neutralSince = 0; }
-                    } else neutralSince = 0;
-                    return;
-                }
-                if (isProcessingTilt || now - lastMotionTime < 250) return;
-                const sDown = (dz * tiltCal.down.z + dgRaw * tiltCal.down.g + dbRaw * tiltCal.down.b) / tiltCal.down.len;
-                const sUp = (dz * tiltCal.up.z + dgRaw * tiltCal.up.g + dbRaw * tiltCal.up.b) / tiltCal.up.len;
-                if (sDown >= tiltCal.down.len * 0.55 && sDown >= sUp + 4) {
-                    tiltState = 'locked'; neutralSince = 0; lastMotionTime = now;
-                    handleTilt('pass');
-                } else if (sUp >= tiltCal.up.len * 0.55 && sUp >= sDown + 4) {
-                    tiltState = 'locked'; neutralSince = 0; lastMotionTime = now;
-                    handleTilt('correct');
-                }
-                return;
-            }
-
-            // UNCALIBRATED fallback (original heuristics, mapping corrected to
-            // Remaur's model: down nod = PASS, up nod = CORRECT).
-            const dgAbs = (lastGamma === null || tiltBase.g === null) ? 0 : Math.abs(tiltBase.g) - Math.abs(lastGamma);
-            const inNeutral = Math.abs(dz) <= 0.8 && Math.abs(dgRaw) <= 6;
-            if (tiltState === 'locked') {
-                if (inNeutral) {
-                    if (!neutralSince) neutralSince = now;
-                    if (now - neutralSince >= 300) { tiltState = 'armed'; neutralSince = 0; }
-                } else neutralSince = 0;
-                return;
-            }
-            if (isProcessingTilt) return;
-            if (now - lastMotionTime < 250) return;
-
-            if ((dgAbs >= 32 && dz <= 0.5) || dz >= 3.0) {
-                tiltState = 'locked'; neutralSince = 0; lastMotionTime = now;
-                handleTilt('pass');
-            } else if (dz <= -3.6 || (dgAbs <= -14 && dz <= 0.5)) {
-                tiltState = 'locked'; neutralSince = 0; lastMotionTime = now;
-                handleTilt('correct');
-            }
-        }
-
         function handleTilt(action) {
+            if (!document.getElementById('game-screen').classList.contains('active')) return;
             if (isProcessingTilt) return;
             isProcessingTilt = true;
 
@@ -1015,9 +1809,7 @@
             clearInterval(gameInterval);
             stopRecording();
             soundFX.end();
-            window.removeEventListener('devicemotion', handleMotion);
-            window.removeEventListener('deviceorientation', handleOrientation);
-            tiltBase = null;
+            pauseSensors();
 
             document.getElementById('final-score').innerText = score;
             const resultsList = document.getElementById('results-list');
@@ -1043,15 +1835,15 @@
 
 
 
-        // --- MOTION TOGGLE + TILT CALIBRATION ---
-        let motionOn = true;
-        try { motionOn = localStorage.getItem('hu_motion') !== '0'; } catch (e) {}
-        let tiltCal = null;
-        try { tiltCal = JSON.parse(localStorage.getItem('hu_tilt_cal') || 'null'); } catch (e) { tiltCal = null; }
+        // --- MOTION TOGGLE + TILT CALIBRATION (gravity-sphere subsystem) ---
+        function motionPref() { try { return localStorage.getItem('hu_motion') !== '0'; } catch (e) { return true; } }
+        function pauseSensors() { const was = motionOn; stopMotion(); motionOn = was; }
 
         function setMotion(on) {
+            try { localStorage.setItem('hu_motion', on ? '1' : '0'); } catch (e) {}
             motionOn = !!on;
-            try { localStorage.setItem('hu_motion', motionOn ? '1' : '0'); } catch (e) {}
+            if (on) { startMotion().then(ok => { if (ok === false) { motionOn = false; syncMotionUI(); } }); }
+            else { stopMotion(); motionOn = false; }
             syncMotionUI();
         }
         function syncMotionUI() {
@@ -1060,21 +1852,40 @@
             const t = document.getElementById('motion-toggle');
             if (t) t.checked = motionOn;
             const cs = document.getElementById('cal-status');
-            if (cs) cs.textContent = tiltCal ? 'Tilt calibrated ✓ — your own nods are the triggers.' : 'Tilt not calibrated yet — calibration makes it work folded or unfolded.';
+            if (cs) cs.textContent = isTiltCalibrated() ? 'Tilt calibrated ✓ for this phone shape — your own nods are the triggers.' : 'Tilt not calibrated for this phone shape yet — calibrate folded and unfolded for best results.';
         }
 
-        let calStep = 0, calSamples = [], calBase = null, calDownVec = null;
-        function calCapture(ms, done) {
-            calSamples = [];
-            const iv = setInterval(() => { if (lastZ !== null || lastGamma !== null) calSamples.push({ z: lastZ || 0, g: lastGamma || 0, b: lastBeta || 0 }); }, 50);
-            setTimeout(() => { clearInterval(iv); done(calSamples.slice()); }, ms);
-        }
+        let calDone = false, calWatchdog = null;
         function startCalibration() {
-            window.addEventListener('devicemotion', handleMotion);
-            window.addEventListener('deviceorientation', handleOrientation);
-            calStep = 0; calBase = null; calDownVec = null;
+            calDone = false;
             showScreen('calibration-screen');
-            calSetUI('📱', 'Hold the phone on your forehead, screen facing out — exactly how you play. Keep it steady.', "I'm Ready");
+            clearTimeout(calWatchdog);
+            calWatchdog = setTimeout(() => {
+                if (!calDone && document.getElementById('calibration-screen').classList.contains('active')) {
+                    calSetUI('⚠️', 'No sensor data came in. Motion may be blocked on this device — you can still play with taps.', 'Try Again');
+                }
+            }, 20000);
+            startTiltCalibration({
+                onStep: (step) => {
+                    if (step === 'rest') calSetUI('📱', 'Hold the phone on your forehead, screen facing out — exactly how you play. Keep it steady…', 'Hold still…');
+                    else if (step === 'down') calSetUI('⬇️', 'Now nod DOWN — your PASS motion — then come back to level.', 'Listening…');
+                    else if (step === 'up') calSetUI('⬆️', 'Now nod UP — your CORRECT motion — then come back to level.', 'Listening…');
+                    document.getElementById('cal-btn').disabled = true;
+                },
+                onComplete: () => {
+                    calDone = true;
+                    clearTimeout(calWatchdog);
+                    if (!motionPref()) stopMotion();
+                    syncMotionUI();
+                    calSetUI('✅', 'Calibration saved for this phone shape! Down nod = Pass, up nod = Correct. Tip: calibrate again in the other shape (folded vs unfolded) too.', 'Done');
+                },
+                onError: (msg) => {
+                    calDone = false;
+                    clearTimeout(calWatchdog);
+                    if (!motionPref()) stopMotion();
+                    calSetUI('⚠️', msg + ' You can still play with taps.', 'Try Again');
+                }
+            });
         }
         function calSetUI(big, text, btn) {
             document.getElementById('cal-big').textContent = big;
@@ -1083,44 +1894,10 @@
             b.textContent = btn; b.disabled = false;
         }
         function calAdvance() {
-            const btn = document.getElementById('cal-btn');
-            if (calStep === 0) {
-                btn.disabled = true; btn.textContent = 'Hold still…';
-                calCapture(900, (s) => {
-                    if (!s.length) { calSetUI('⚠️', 'No sensor data came in. Motion may be blocked on this device — you can still play with taps.', 'Try Again'); return; }
-                    calBase = s.reduce((a, p) => ({ z: a.z + p.z / s.length, g: a.g + p.g / s.length, b: a.b + p.b / s.length }), { z: 0, g: 0, b: 0 });
-                    calStep = 1;
-                    calSetUI('⬇️', 'Now do ONE clear nod DOWN — your PASS motion — then come back to level.', 'Start Nod');
-                });
-            } else if (calStep === 1 || calStep === 2) {
-                const isDown = calStep === 1;
-                btn.disabled = true; btn.textContent = 'Nod now!';
-                calCapture(3500, (s) => {
-                    let best = null, bestLen = 0;
-                    s.forEach(p => { const d = { z: p.z - calBase.z, g: p.g - calBase.g, b: p.b - calBase.b }; const L = Math.hypot(d.z, d.g, d.b); if (L > bestLen) { bestLen = L; best = d; } });
-                    if (!best || bestLen < 8) { calSetUI('⚠️', "Didn't catch that nod — make it one clear, deliberate nod.", 'Try Again'); return; }
-                    best.len = bestLen;
-                    if (isDown) {
-                        calDownVec = best; calStep = 2;
-                        calSetUI('⬆️', 'Now ONE clear nod UP — your CORRECT motion — then back to level.', 'Start Nod');
-                    } else {
-                        tiltCal = { down: calDownVec, up: best };
-                        try { localStorage.setItem('hu_tilt_cal', JSON.stringify(tiltCal)); } catch (e) {}
-                        calStep = 3;
-                        calCleanup();
-                        syncMotionUI();
-                        calSetUI('✅', 'Calibration saved! Down nod = Pass, up nod = Correct — measured from your phone, folded or unfolded.', 'Done');
-                    }
-                });
-            } else {
-                cancelCalibration();
-            }
+            if (calDone) { cancelCalibration(); return; }
+            startCalibration();
         }
-        function calCleanup() {
-            window.removeEventListener('devicemotion', handleMotion);
-            window.removeEventListener('deviceorientation', handleOrientation);
-        }
-        function cancelCalibration() { calCleanup(); showScreen('menu-screen'); }
+        function cancelCalibration() { clearTimeout(calWatchdog); cancelTiltCalibration(); if (!motionPref()) stopMotion(); showScreen('menu-screen'); }
 
         (function initMotion() {
             syncMotionUI();
